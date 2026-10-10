@@ -1,0 +1,31 @@
+{
+	auto_https off
+}
+
+https://{$EDGE_HOST}:{$EDGE_HTTPS_PORT} {
+	tls /certs/localhost-fullchain.pem /certs/localhost.key
+
+	handle /control-plane/internal* {
+		respond 403
+	}
+
+	handle_path /control-plane/* {
+		reverse_proxy control-plane:8081
+	}
+
+	handle_path /gateway/* {
+		reverse_proxy gateway:8080
+	}
+
+	handle_path /opa/* {
+		reverse_proxy opa:8181
+	}
+
+	handle_path /policy-llm/* {
+		reverse_proxy policy-llm:11434
+	}
+
+	handle {
+		reverse_proxy portal-ui:5173
+	}
+}

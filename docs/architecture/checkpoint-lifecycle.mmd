@@ -1,0 +1,39 @@
+%% Checkpoint and project-memory lifecycle in Context Guardian (all local).
+%% Source: src/App.tsx, src/guardian/{checkpoint,memory,prompt}.ts,
+%%         src-tauri/src/{storage,memory}.rs
+flowchart TD
+    Monitor["Monitoring<br/>(mock or gateway reading)"] -->|"85% event"| Auto["Automatic DRAFT checkpoint"]
+    User["User: Checkpoint now"] --> Manual["Manual DRAFT checkpoint"]
+    Auto --> Build
+    Manual --> Build
+    Build["createDraft()<br/>carry forward from newest checkpoint<br/>(same project id, or same name if unassigned)<br/>+ project memory if a project is active<br/>carried 'verified' → 'reported'; carried tests → 'NOT rerun'"]
+    Build --> Edit["Editor: free-text fields +<br/>structured work items, evidence, tests,<br/>commands, errors, decisions"]
+    Edit -->|debounced autosave| Save
+    Save["Rust Store::save<br/>validate · evidence rules · secret guard<br/>atomic write · read back and compare"]
+    Save -->|"v1 file being saved as v2"| Backup["Copy original bytes to<br/>checkpoints/.backups/ and verify first"]
+    Save --> Files[("checkpoints/&lt;id&gt;.json<br/>(local app-data directory)")]
+    Files --> History["History view<br/>(project · unassigned · all)"]
+    History --> Edit
+    Edit -->|Mark final| Final["Final checkpoint"]
+    Final --> Prompt["Continuation prompt<br/>NEXT ACTION first · evidence groups ·<br/>capped lists · memory summary"]
+    Prompt -->|"secret check, then"| Clip["Clipboard → paste into a new AI session<br/>(done by the user)"]
+
+    subgraph Memory["Project memory (explicit, reviewed)"]
+        Import["Create project from checkpoint (import)"]
+        Merge["Propose memory update from FINAL checkpoint"]
+        MEdit["Edit memory / approvals"]
+        Preview["Preview of every change"]
+        Approve{"Approve and save?"}
+        MStore[("projects/&lt;id&gt;/memory.json<br/>revisions/ (latest 50)")]
+        Import --> Preview
+        Merge --> Preview
+        MEdit --> Preview
+        Preview --> Approve
+        Approve -->|"yes + revision check +<br/>no-removal check"| MStore
+        Approve -->|cancel| Nothing["Nothing written"]
+    end
+    History -->|explicit| Import
+    Final -->|explicit| Merge
+    MStore -->|"read when building drafts and prompts"| Build
+    MStore --> Prompt
+    Auto -. "never updates memory" .-x MStore

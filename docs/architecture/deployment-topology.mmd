@@ -1,0 +1,44 @@
+%% Deployment topology and data boundaries as implemented today (local development).
+%% No cloud deployment of this repository is described here; see docs/saas/ for plans.
+flowchart LR
+    subgraph Workstation["User workstation (macOS tested)"]
+        subgraph App["Context Guardian process"]
+            CGUI["UI (WebView)"]
+            CGRust["Rust core"]
+        end
+        AppData[("App-data dir — LOCAL ONLY<br/>checkpoints · project memory · revisions · settings")]
+        KC[("macOS Keychain — LOCAL ONLY<br/>gateway API key")]
+        Browser["Browser"]
+        ChatClient["Chat client / script<br/>you configure"]
+        CGRust --- AppData
+        CGRust --- KC
+    end
+
+    subgraph Docker["Docker host (same machine in local dev) — network suez-net"]
+        Edge["edge (Caddy) :5443"]
+        GW["gateway :8080"]
+        CP["control-plane :8081"]
+        Portal["portal-ui :5173"]
+        OPA["opa :8181"]
+        PLLM["policy-llm (Ollama) :11434"]
+        PG[("postgres :5432<br/>volume postgres-data")]
+        RD[("redis :6379")]
+        Edge --> Portal & CP & GW
+        GW --> CP & OPA & PG & RD
+        CP --> PG & OPA & PLLM
+    end
+
+    subgraph Internet["External providers (optional, paid)"]
+        P1["OpenAI-compatible endpoint"]
+        P2["Groq"]
+    end
+
+    CGRust -->|"SENT: session id + API key header<br/>RECEIVED: token counts, percent, status"| GW
+    Browser -->|HTTPS| Edge
+    ChatClient -->|"SENT: chat messages + X-SUEZ-Session-Id"| GW
+    GW -->|"SENT: chat messages (only for models<br/>configured with these providers)"| P1 & P2
+
+    classDef local fill:#eef6ee,stroke:#3a7a3a;
+    class AppData,KC local;
+%% Checkpoints, project memory and continuation prompts are never sent to the gateway
+%% or to any provider by the app. The user decides where to paste a prompt.

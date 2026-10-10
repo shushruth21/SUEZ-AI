@@ -1,0 +1,66 @@
+# Continuation prompt — SUEZ Context Guardian checkpoint
+
+You are continuing work on the project "Example Project" from a previous AI session that was checkpointed before its context window filled up. Treat the checkpoint below as the authoritative record of project state.
+
+## Checkpoint
+- Checkpoint ID: example-cg-v1-legacy-sample
+- Created: 2026-01-15T12:00:00.000Z
+- Session: Example session — synthetic test data
+- Status: final (reviewed by the user)
+- Trigger: manual
+- Context usage at checkpoint: unavailable — no trustworthy context measurement existed when this checkpoint was made.
+
+## Goal
+Synthetic schema-1 checkpoint used only by automated tests.
+
+It mirrors the structure and the bracketed status labels of a real hand-written checkpoint, but every value is fictional.
+
+## Current state
+The example feature is implemented and tested in a throwaway environment. Nothing has been deployed to the example environment.
+
+This paragraph exists so that multi-paragraph text is preserved by the loader.
+
+## Decisions made
+- Reuse the existing example service; do not rebuild it.
+- Never invent a percentage when the context window is unknown.
+- Keep API keys out of checkpoints, logs and prompts.
+- Tests use a throwaway stack and a free stub model only.
+
+## Completed
+- [DONE] Example widget renders the usage meter.
+- [DONE] Example checkpoint editor and local history.
+- [VERIFIED 2026-01-15, rerun during this checkpoint] Frontend type check: exit 0.
+- [VERIFIED 2026-01-15, rerun during this checkpoint] Vitest: 4 files, 54/54 passed.
+- [REPORTED, previous session — not rerun] Go vet clean; Go unit tests passed.
+- [REPORTED, previous session — not rerun] Example smoke test: 10/10 passed.
+
+## Open tasks
+- [PENDING — user action] Migration 0006 is NOT applied to the example database.
+- [PENDING — user action] The updated service is NOT deployed to the example environment.
+- [PENDING] Add a retention policy for example measurements.
+- [NOT TESTED] Provider-reported token counts against a paid provider.
+- [LIMITATION] Credential storage tested on one operating system only.
+- [LIMITATION] Example build is unsigned.
+- [LIMITATION] Example build targets one CPU architecture.
+- [LIMITATION] Monitoring covers only requests routed through the example gateway.
+- [HOUSEKEEPING] Throwaway test stack is still running.
+- [DEFERRED by user] Title-bar design improvements.
+
+## Files touched
+- src/example/widget.ts (new)
+- src/example/editor.ts (modified)
+- README.md (modified)
+
+## Next steps
+- EXACT NEXT ACTION: plan the next example milestone and wait for approval.
+- Do not claim access to data the app cannot read.
+- Optional cleanup when no longer needed: stop the throwaway test stack.
+
+## Notes
+SYNTHETIC TEST DATA. This file contains no real project information, paths, credentials or session identifiers.
+
+## Instructions
+1. Read this whole checkpoint before acting.
+2. Do not redo anything listed under "Completed" unless asked.
+3. Keep to the decisions listed above; if one has to change, say so explicitly and explain why.
+4. Confirm your understanding in one short paragraph, then start with the first item under "Next steps".

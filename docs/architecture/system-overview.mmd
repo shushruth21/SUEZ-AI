@@ -1,0 +1,58 @@
+%% SUEZ — system overview (actual components only).
+%% Solid arrows: implemented calls. Dashed arrows: optional / configuration-dependent.
+flowchart LR
+    subgraph Desktop["Developer machine — SUEZ Context Guardian (Tauri 2)"]
+        UI["React + TypeScript UI<br/>monitor · editor · history · project memory"]
+        Mock["Mock usage source<br/>(simulated, labelled MOCK DATA)"]
+        GwSrc["Gateway usage source<br/>(polling, freshness checks)"]
+        Rust["Rust core (Tauri commands)<br/>storage.rs · memory.rs · gateway.rs"]
+        Files[("App-data directory<br/>checkpoints/ · projects/ · settings.json")]
+        Keychain[("OS credential store<br/>macOS Keychain<br/>gateway API key only")]
+        UI --> Mock
+        UI --> GwSrc
+        GwSrc -->|invoke| Rust
+        UI -->|invoke: save / list / memory| Rust
+        Rust --> Files
+        Rust --> Keychain
+    end
+
+    subgraph Stack["SUEZ gateway stack (Docker Compose)"]
+        Edge["Caddy edge<br/>HTTPS :5443"]
+        Portal["Portal UI<br/>React SPA"]
+        GW["Gateway (Go)<br/>/v1/chat/completions · /v1/tools/execute<br/>/v1/context/usage · /v1/identity"]
+        CP["Control plane (Go)<br/>auth resolve · catalog · access · policies · audit"]
+        OPA["OPA<br/>Rego decisions"]
+        PLLM["policy-llm<br/>Ollama (local model)"]
+        PG[("PostgreSQL<br/>tenants · keys · models · grants<br/>policies · audit · context_usage_measurements*")]
+        Redis[("Redis<br/>quotas · response cache · stats")]
+        Edge --> Portal
+        Edge --> CP
+        Edge --> GW
+        Portal --> CP
+        Portal --> GW
+        GW -->|identity resolve| CP
+        GW --> OPA
+        GW --> PG
+        GW --> Redis
+        CP --> PG
+        CP --> OPA
+        CP --> PLLM
+        Stub["Stub provider<br/>(in-process, gateway estimate)"]
+    end
+
+    subgraph Providers["External AI providers"]
+        OAI["OpenAI-compatible API"]
+        Groq["Groq API"]
+    end
+
+    Rust -->|"HTTP GET /v1/context/usage?session=id<br/>X-API-Key header (5 s timeout)"| GW
+    Client["Chat client you control<br/>(sends X-SUEZ-Session-Id)"] -->|POST /v1/chat/completions| GW
+    GW -.->|provider = openai-compatible| OAI
+    GW -.->|provider = groq| Groq
+    GW -.->|provider = stub| Stub
+
+    classDef local fill:#eef6ee,stroke:#3a7a3a;
+    classDef store fill:#f5f0e6,stroke:#8a6d3b;
+    class Files,Keychain local;
+    class PG,Redis store;
+%% * context_usage_measurements and models.context_window exist only after migration 0006 is applied.
