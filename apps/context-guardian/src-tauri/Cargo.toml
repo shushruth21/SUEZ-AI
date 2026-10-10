@@ -1,0 +1,25 @@
+[package]
+name = "context-guardian"
+version = "0.1.0"
+description = "SUEZ Context Guardian - floating context-usage monitor and checkpoint tool"
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "context_guardian_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-clipboard-manager = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+keyring = { version = "3", features = ["apple-native", "windows-native"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls"] }
+url = "2"
+
+[dev-dependencies]
+tempfile = "3"

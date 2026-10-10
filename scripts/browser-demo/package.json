@@ -1,0 +1,11 @@
+{
+  "name": "suez-browser-demo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "demo": "node demo.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.49.0"
+  }
+}

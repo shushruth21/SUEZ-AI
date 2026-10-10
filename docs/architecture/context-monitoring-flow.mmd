@@ -1,0 +1,35 @@
+%% How Context Guardian turns a usage reading into threshold events.
+%% Source: src/usage/*.ts, src/guardian/threshold.ts, src-tauri/src/gateway.rs,
+%%         apps/gateway/cmd/server/context_usage.go
+flowchart TD
+    Start([Poll tick or slider change]) --> Which{Usage source<br/>chosen in Settings}
+
+    Which -->|Mock| MockPct["Simulated percent<br/>labelled MOCK DATA"]
+    MockPct --> Guard
+
+    Which -->|SUEZ gateway| Cfg{Gateway URL and<br/>Keychain key present?}
+    Cfg -->|no| NotCfg["status: not_configured"] --> NoGuard
+    Cfg -->|yes| Req["Rust: GET /v1/context/usage?session=id<br/>5 s timeout; key never returned to UI"]
+    Req -->|timeout / connection error| NetErr["status: network_error"] --> Stale
+    Req -->|401 / 403| AuthErr["status: auth_failed"] --> Stale
+    Req -->|"other non-2xx<br/>(503 = migration 0006 missing)"| GwErr["status: gateway_error"] --> Stale
+    Req -->|200| Validate{"Response valid and<br/>for the same session?"}
+    Validate -->|no| Invalid["status: invalid_response"] --> Stale
+    Validate -->|yes| Status{Gateway status}
+
+    Status -->|no_measurement| NoMeas["No tagged request yet"] --> NoGuard
+    Status -->|unavailable| Unavail["Provider returned no usage<br/>(older measurement NOT reused)"] --> NoGuard
+    Status -->|unknown_context_window| UnkWin["Token counts shown,<br/>no percentage<br/>(models.context_window unset)"] --> NoGuard
+    Status -->|ok| Src["Percent = latest request's<br/>prompt + completion tokens / context_window<br/>source: provider_reported or gateway_estimate"]
+    Src --> Fresh{"Last successful poll<br/>within 3 × poll interval?"}
+    Fresh -->|no| Stale
+    Fresh -->|yes| Guard
+
+    Stale["Show last good value marked STALE<br/>(display only)"] --> NoGuard
+    NoGuard["Threshold engine receives null:<br/>no events, nothing invented,<br/>no automatic switch to Mock"]
+
+    Guard{"Threshold engine<br/>(one-shot, re-arm below threshold − 5%)"}
+    Guard -->|"≥ 85% and armed"| CP85["checkpoint event:<br/>save a DRAFT checkpoint immediately,<br/>open the editor"]
+    Guard -->|"≥ 95% and armed"| C95["critical event:<br/>red banner, request window attention,<br/>pause simulation"]
+    Guard -->|below thresholds / already fired| Idle["No event"]
+    CP85 -.->|"restart in same gateway session<br/>with a draft already on disk"| Disarmed["Trigger starts disarmed:<br/>no duplicate draft"]

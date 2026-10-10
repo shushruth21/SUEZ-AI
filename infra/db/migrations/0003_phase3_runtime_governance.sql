@@ -1,0 +1,45 @@
+ALTER TABLE models
+    ADD COLUMN IF NOT EXISTS external_name TEXT,
+    ADD COLUMN IF NOT EXISTS enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    ADD COLUMN IF NOT EXISTS upstream_base_url TEXT,
+    ADD COLUMN IF NOT EXISTS upstream_model TEXT,
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+UPDATE models
+SET external_name = model_name
+WHERE external_name IS NULL;
+
+ALTER TABLE models
+    ALTER COLUMN external_name SET NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS models_tenant_external_name_key
+    ON models (tenant_id, external_name);
+
+ALTER TABLE tools
+    ADD COLUMN IF NOT EXISTS enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    ADD COLUMN IF NOT EXISTS execution_mode TEXT NOT NULL DEFAULT 'stub',
+    ADD COLUMN IF NOT EXISTS target_url TEXT,
+    ADD COLUMN IF NOT EXISTS timeout_ms INTEGER NOT NULL DEFAULT 5000,
+    ADD COLUMN IF NOT EXISTS http_headers JSONB NOT NULL DEFAULT '{}'::jsonb,
+    ADD COLUMN IF NOT EXISTS output_schema JSONB NOT NULL DEFAULT '{}'::jsonb,
+    ADD COLUMN IF NOT EXISTS risk_tier TEXT NOT NULL DEFAULT 'standard',
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+ALTER TABLE policies
+    ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT 'model',
+    ADD COLUMN IF NOT EXISTS target_name TEXT,
+    ADD COLUMN IF NOT EXISTS enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+CREATE TABLE IF NOT EXISTS tool_executions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tool_id UUID REFERENCES tools(id) ON DELETE SET NULL,
+    tool_name TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    status TEXT NOT NULL,
+    trace_id TEXT,
+    input_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    output_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

@@ -1,0 +1,100 @@
+# Broad names like "server" or unanchored "bin/" match ANY path segment and can
+# hide source dirs (e.g. cmd/server/). Prefer root-anchored (/bin/) or full paths.
+
+.DS_Store
+.env
+node_modules/
+dist/
+coverage/
+.vite/
+/tmp/
+*.log
+
+# Go — build output at repo root only (not .../bin/ elsewhere)
+/bin/
+# Built binaries next to go.mod (never use bare "server" — it ignored cmd/server/)
+apps/gateway/server
+apps/control-plane/server
+
+# Docker
+.docker/
+
+# IDE
+.cursor/
+
+# Local tooling
+.tooling/
+
+# Browser demo (Playwright)
+scripts/browser-demo/node_modules/
+scripts/browser-demo/screenshots/
+scripts/browser-demo/recordings/
+scripts/browser-demo/.playwright-browsers/
+
+# Local runtime hardening artifacts
+infra/tls/generated/*.crt
+infra/tls/generated/*.key
+infra/secrets/*
+!infra/secrets/README.md
+
+# --- Secrets hardening ---
+# Env variants anywhere (e.g. .env.aws per scripts/aws/README.md); keep the template
+.env.*
+!.env.example
+# Key / certificate material anywhere
+*.pem
+*.key
+*.p12
+*.pfx
+# Cloud credentials / state
+.aws/
+*.tfstate
+*.tfstate.*
+# Database dumps outside /tmp
+*.dump
+
+# --- Context Guardian ---
+# Build output, generated schemas and local-only fixtures are listed in
+# apps/context-guardian/.gitignore.
+
+# --- Generic build output ---
+build/
+*.tsbuildinfo
+# Rust (any crate)
+target/
+# Go test binaries and coverage
+*.test
+*.out
+coverage.out
+# Packaged desktop installers / bundles
+*.dmg
+*.app/
+*.msi
+*.AppImage
+*.deb
+*.rpm
+
+# --- Local data that must never be published ---
+# Database dumps, backups and exports (scripts default to /tmp/, ignored above)
+*-backup.sql
+*.sql.gz
+*.sqlite
+*.sqlite3
+*.db
+/backups/
+# Accidental copies of the Context Guardian app-data directory
+# (checkpoints, project memory, revisions, settings)
+ai.acrosystems.suez.contextguardian/
+# Generic secret-file names
+*.secret
+*.secrets
+credentials.json
+service-account*.json
+
+# --- Editors / OS ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+Thumbs.db

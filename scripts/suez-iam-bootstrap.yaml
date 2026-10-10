@@ -1,0 +1,321 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Bootstrap IAM stack for SUEZ. Admin deploys this once. It grants the existing
+  suez-gateway group permission to deploy only SUEZ-prefixed CloudFormation stacks
+  by passing a tightly scoped CloudFormation execution role.
+
+Parameters:
+  GatewayGroupName:
+    Type: String
+    Default: suez-gateway
+    Description: Existing IAM group that contains the suez user.
+  AllowedStackNamePrefix:
+    Type: String
+    Default: suez-
+    Description: Only CloudFormation stacks with this prefix may be managed by the group.
+  ResourceNamePrefix:
+    Type: String
+    Default: suez
+    Description: Prefix used for IAM role and resource names managed by SUEZ.
+  ArtifactBucketName:
+    Type: String
+    Default: ''
+    Description: Optional pre-created S3 bucket name for CloudFormation artifacts/templates.
+  PermissionsBoundaryArn:
+    Type: String
+    Default: ''
+    Description: Optional permissions boundary ARN to attach to the execution role.
+
+Conditions:
+  HasArtifactBucket: !Not [!Equals [!Ref ArtifactBucketName, '']]
+  HasPermissionsBoundary: !Not [!Equals [!Ref PermissionsBoundaryArn, '']]
+
+Resources:
+  SuezCloudFormationExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ResourceNamePrefix}-cfn-exec-role'
+      Description: CloudFormation execution role for SUEZ application stacks.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFormationAssume
+            Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+            Action: sts:AssumeRole
+      PermissionsBoundary: !If
+        - HasPermissionsBoundary
+        - !Ref PermissionsBoundaryArn
+        - !Ref AWS::NoValue
+      Policies:
+        - PolicyName: !Sub '${ResourceNamePrefix}-cfn-exec-policy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadOnlyDiscovery
+                Effect: Allow
+                Action:
+                  - ec2:Describe*
+                  - ecs:Describe*
+                  - ecs:List*
+                  - elasticloadbalancing:Describe*
+                  - logs:Describe*
+                  - rds:Describe*
+                  - rds:ListTagsForResource
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:ListSecrets
+                  - s3:GetBucketLocation
+                  - s3:ListAllMyBuckets
+                  - ssm:DescribeParameters
+                  - ssm:GetParameters
+                  - kms:ListAliases
+                Resource: '*'
+
+              - Sid: ManageTaggedSecurityGroups
+                Effect: Allow
+                Action:
+                  - ec2:CreateSecurityGroup
+                  - ec2:DeleteSecurityGroup
+                  - ec2:AuthorizeSecurityGroupIngress
+                  - ec2:AuthorizeSecurityGroupEgress
+                  - ec2:RevokeSecurityGroupIngress
+                  - ec2:RevokeSecurityGroupEgress
+                  - ec2:CreateTags
+                  - ec2:DeleteTags
+                Resource: '*'
+
+              - Sid: ManageCloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:DeleteLogGroup
+                  - logs:PutRetentionPolicy
+                  - logs:CreateLogStream
+                  - logs:DeleteLogStream
+                  - logs:PutLogEvents
+                  - logs:TagResource
+                  - logs:UntagResource
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/${ResourceNamePrefix}*'
+                  - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/${ResourceNamePrefix}*'
+                  - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${ResourceNamePrefix}*'
+                  - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/${ResourceNamePrefix}*:log-stream:*'
+                  - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/${ResourceNamePrefix}*:log-stream:*'
+                  - !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${ResourceNamePrefix}*:log-stream:*'
+
+              - Sid: ManageEcsServices
+                Effect: Allow
+                Action:
+                  - ecs:CreateCluster
+                  - ecs:DeleteCluster
+                  - ecs:RegisterTaskDefinition
+                  - ecs:DeregisterTaskDefinition
+                  - ecs:CreateService
+                  - ecs:UpdateService
+                  - ecs:DeleteService
+                  - ecs:TagResource
+                  - ecs:UntagResource
+                  - ecs:RunTask
+                  - ecs:StopTask
+                Resource: '*'
+                Condition:
+                  StringLikeIfExists:
+                    ecs:cluster:
+                      - !Sub 'arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:cluster/${ResourceNamePrefix}*'
+
+              - Sid: EcrReadForTaskImages
+                Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:DescribeImages
+                  - ecr:DescribeRepositories
+                  - ecr:ListImages
+                Resource: '*'
+
+              - Sid: ManageLoadBalancing
+                Effect: Allow
+                Action:
+                  - elasticloadbalancing:CreateLoadBalancer
+                  - elasticloadbalancing:DeleteLoadBalancer
+                  - elasticloadbalancing:CreateTargetGroup
+                  - elasticloadbalancing:DeleteTargetGroup
+                  - elasticloadbalancing:CreateListener
+                  - elasticloadbalancing:DeleteListener
+                  - elasticloadbalancing:ModifyListener
+                  - elasticloadbalancing:ModifyTargetGroup
+                  - elasticloadbalancing:RegisterTargets
+                  - elasticloadbalancing:DeregisterTargets
+                  - elasticloadbalancing:AddTags
+                  - elasticloadbalancing:RemoveTags
+                Resource: '*'
+
+              - Sid: ManageRdsPostgresMvp
+                Effect: Allow
+                Action:
+                  - rds:CreateDBInstance
+                  - rds:ModifyDBInstance
+                  - rds:DeleteDBInstance
+                  - rds:StartDBInstance
+                  - rds:StopDBInstance
+                  - rds:CreateDBSubnetGroup
+                  - rds:ModifyDBSubnetGroup
+                  - rds:DeleteDBSubnetGroup
+                  - rds:AddTagsToResource
+                  - rds:RemoveTagsFromResource
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:db:${ResourceNamePrefix}*'
+                  - !Sub 'arn:${AWS::Partition}:rds:${AWS::Region}:${AWS::AccountId}:subgrp:${ResourceNamePrefix}*'
+
+              - Sid: ManageSsmAndSecretsWithPrefix
+                Effect: Allow
+                Action:
+                  - ssm:PutParameter
+                  - ssm:DeleteParameter
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:AddTagsToResource
+                  - ssm:RemoveTagsFromResource
+                  - secretsmanager:CreateSecret
+                  - secretsmanager:UpdateSecret
+                  - secretsmanager:DeleteSecret
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:TagResource
+                  - secretsmanager:UntagResource
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ResourceNamePrefix}/*'
+                  - !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ResourceNamePrefix}/*'
+
+              - Sid: UseS3ArtifactsBucketIfProvided
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !If
+                  - HasArtifactBucket
+                  - !Sub 'arn:${AWS::Partition}:s3:::${ArtifactBucketName}/${ResourceNamePrefix}/*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::nonexistent-placeholder-bucket/${ResourceNamePrefix}/*'
+
+              - Sid: ListArtifactsBucketIfProvided
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !If
+                  - HasArtifactBucket
+                  - !Sub 'arn:${AWS::Partition}:s3:::${ArtifactBucketName}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::nonexistent-placeholder-bucket'
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - !Sub '${ResourceNamePrefix}/*'
+
+              - Sid: PassOnlySuezTaskRoles
+                Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ResourceNamePrefix}-ecs-task-role'
+                  - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ResourceNamePrefix}-ecs-exec-role'
+                Condition:
+                  StringEquals:
+                    iam:PassedToService:
+                      - ecs-tasks.amazonaws.com
+
+  SuezGatewayGroupInlinePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub '${ResourceNamePrefix}-gateway-deployer'
+      Groups:
+        - !Ref GatewayGroupName
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: CloudFormationManageOnlyPrefixedStacks
+            Effect: Allow
+            Action:
+              - cloudformation:CreateStack
+              - cloudformation:UpdateStack
+              - cloudformation:DeleteStack
+              - cloudformation:CreateChangeSet
+              - cloudformation:DeleteChangeSet
+              - cloudformation:ExecuteChangeSet
+              - cloudformation:DescribeStacks
+              - cloudformation:DescribeStackEvents
+              - cloudformation:DescribeStackResources
+              - cloudformation:DescribeChangeSet
+              - cloudformation:GetTemplate
+              - cloudformation:ValidateTemplate
+              - cloudformation:ListStackResources
+              - cloudformation:TagResource
+              - cloudformation:UntagResource
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AllowedStackNamePrefix}*/*'
+              - !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:changeSet/${AllowedStackNamePrefix}*/*'
+
+          - Sid: CloudFormationListAndValidate
+            Effect: Allow
+            Action:
+              - cloudformation:ListStacks
+              - cloudformation:ListChangeSets
+              - cloudformation:ValidateTemplate
+            Resource: '*'
+
+          - Sid: PassOnlyTheExecutionRoleToCloudFormation
+            Effect: Allow
+            Action:
+              - iam:PassRole
+            Resource: !GetAtt SuezCloudFormationExecutionRole.Arn
+            Condition:
+              StringEquals:
+                iam:PassedToService:
+                  - cloudformation.amazonaws.com
+
+          - Sid: ReadOnlyForTroubleshooting
+            Effect: Allow
+            Action:
+              - sts:GetCallerIdentity
+              - iam:GetRole
+              - iam:ListAttachedRolePolicies
+              - iam:ListRolePolicies
+            Resource: '*'
+
+          - Sid: OptionalArtifactsBucketAccess
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+            Resource: !If
+              - HasArtifactBucket
+              - !Sub 'arn:${AWS::Partition}:s3:::${ArtifactBucketName}/${ResourceNamePrefix}/*'
+              - !Sub 'arn:${AWS::Partition}:s3:::nonexistent-placeholder-bucket/${ResourceNamePrefix}/*'
+
+          - Sid: OptionalArtifactsBucketList
+            Effect: Allow
+            Action:
+              - s3:ListBucket
+            Resource: !If
+              - HasArtifactBucket
+              - !Sub 'arn:${AWS::Partition}:s3:::${ArtifactBucketName}'
+              - !Sub 'arn:${AWS::Partition}:s3:::nonexistent-placeholder-bucket'
+            Condition:
+              StringLike:
+                s3:prefix:
+                  - !Sub '${ResourceNamePrefix}/*'
+
+Outputs:
+  CloudFormationExecutionRoleArn:
+    Description: Role ARN that the suez user must pass to CloudFormation.
+    Value: !GetAtt SuezCloudFormationExecutionRole.Arn
+
+  AllowedStackPrefix:
+    Description: The only CloudFormation stack name prefix the suez user can manage.
+    Value: !Ref AllowedStackNamePrefix
+
+  GatewayGroupName:
+    Description: Group receiving the deployer policy.
+    Value: !Ref GatewayGroupName

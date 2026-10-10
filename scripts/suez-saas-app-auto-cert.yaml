@@ -1,0 +1,366 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  SUEZ SaaS MVP application stack on AWS. This stack can create the ALB,
+  ACM certificate, Route53 alias record, ECS/Fargate service, and RDS PostgreSQL
+  for the suez.acrosystemsinc.ai SaaS endpoint.
+
+Parameters:
+  ResourceNamePrefix:
+    Type: String
+    Default: suez
+    Description: Prefix for created resources.
+
+  DomainName:
+    Type: String
+    Default: suez.acrosystemsinc.ai
+    Description: Public SaaS hostname.
+
+  HostedZoneId:
+    Type: String
+    Description: Route53 hosted zone ID for acrosystemsinc.ai or the relevant parent zone.
+
+  CreateCertificate:
+    Type: String
+    Default: true
+    AllowedValues: [true, false]
+    Description: Whether this stack should request and validate an ACM certificate automatically.
+
+  ExistingCertificateArn:
+    Type: String
+    Default: ''
+    Description: Existing ACM certificate ARN. Used only when CreateCertificate=false.
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC for the workload.
+
+  PublicSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Public subnets for the ALB.
+
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private subnets for ECS tasks and RDS.
+
+  ContainerImage:
+    Type: String
+    Description: ECR or other container image URI for the SUEZ gateway app.
+
+  ContainerPort:
+    Type: Number
+    Default: 8080
+
+  DesiredCount:
+    Type: Number
+    Default: 1
+
+  Cpu:
+    Type: Number
+    Default: 256
+
+  Memory:
+    Type: Number
+    Default: 512
+
+  DBUsername:
+    Type: String
+    Default: suezapp
+    MinLength: 1
+    MaxLength: 63
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9_]*'
+
+  DBPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    MaxLength: 41
+    Description: PostgreSQL master password.
+
+  DBName:
+    Type: String
+    Default: suezdb
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9_]*'
+
+Conditions:
+  ShouldCreateCertificate: !Equals [!Ref CreateCertificate, 'true']
+  UseExistingCertificate: !Equals [!Ref CreateCertificate, 'false']
+
+Resources:
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Condition: ShouldCreateCertificate
+    Properties:
+      DomainName: !Ref DomainName
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref DomainName
+          HostedZoneId: !Ref HostedZoneId
+      Tags:
+        - Key: Name
+          Value: !Sub '${ResourceNamePrefix}-certificate'
+
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ALB security group for SUEZ SaaS
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - Description: HTTP redirect
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - Description: HTTPS public access
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub '${ResourceNamePrefix}-alb-sg'
+
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ECS application security group
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - Description: ALB to app
+          IpProtocol: tcp
+          FromPort: !Ref ContainerPort
+          ToPort: !Ref ContainerPort
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub '${ResourceNamePrefix}-app-sg'
+
+  DbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: PostgreSQL security group
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - Description: App to PostgreSQL
+          IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref AppSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub '${ResourceNamePrefix}-db-sg'
+
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub '${ResourceNamePrefix}-cluster'
+
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ResourceNamePrefix}-ecs-exec-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ResourceNamePrefix}-ecs-task-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${ResourceNamePrefix}-app'
+      RetentionInDays: 14
+
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnets for SUEZ PostgreSQL
+      DBSubnetGroupName: !Sub '${ResourceNamePrefix}-db-subnet-group'
+      SubnetIds: !Ref PrivateSubnetIds
+
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub '${ResourceNamePrefix}-postgres'
+      Engine: postgres
+      EngineVersion: '16.3'
+      DBInstanceClass: db.t4g.micro
+      AllocatedStorage: 20
+      StorageType: gp3
+      PubliclyAccessible: false
+      MultiAZ: false
+      BackupRetentionPeriod: 1
+      DBName: !Ref DBName
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      VPCSecurityGroups:
+        - !Ref DbSecurityGroup
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      EnablePerformanceInsights: false
+      StorageEncrypted: true
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${ResourceNamePrefix}-alb'
+      Scheme: internet-facing
+      Type: application
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+      Subnets: !Ref PublicSubnetIds
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${ResourceNamePrefix}-tg'
+      VpcId: !Ref VpcId
+      Port: !Ref ContainerPort
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckEnabled: true
+      HealthCheckPath: /health
+      Matcher:
+        HttpCode: '200-399'
+
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: '443'
+            StatusCode: HTTP_301
+            Host: '#{host}'
+            Path: '/#{path}'
+            Query: '#{query}'
+
+  HttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn:
+      - Certificate
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !If
+            - ShouldCreateCertificate
+            - !Ref Certificate
+            - !Ref ExistingCertificateArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${ResourceNamePrefix}-task'
+      Cpu: !Ref Cpu
+      Memory: !Ref Memory
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: !Sub '${ResourceNamePrefix}-app'
+          Image: !Ref ContainerImage
+          Essential: true
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+              Protocol: tcp
+          Environment:
+            - Name: APP_BASE_URL
+              Value: !Sub 'https://${DomainName}'
+            - Name: DB_HOST
+              Value: !GetAtt Database.Endpoint.Address
+            - Name: DB_PORT
+              Value: '5432'
+            - Name: DB_NAME
+              Value: !Ref DBName
+            - Name: DB_USER
+              Value: !Ref DBUsername
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - HttpsListener
+    Properties:
+      ServiceName: !Sub '${ResourceNamePrefix}-app'
+      Cluster: !Ref Cluster
+      DesiredCount: !Ref DesiredCount
+      LaunchType: FARGATE
+      TaskDefinition: !Ref TaskDefinition
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets: !Ref PrivateSubnetIds
+          SecurityGroups:
+            - !Ref AppSecurityGroup
+      LoadBalancers:
+        - ContainerName: !Sub '${ResourceNamePrefix}-app'
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref TargetGroup
+
+  DNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt LoadBalancer.DNSName
+        HostedZoneId: !GetAtt LoadBalancer.CanonicalHostedZoneID
+        EvaluateTargetHealth: false
+
+Outputs:
+  ServiceUrl:
+    Description: SaaS URL
+    Value: !Sub 'https://${DomainName}'
+
+  CertificateArn:
+    Description: ACM certificate ARN in use
+    Value: !If
+      - ShouldCreateCertificate
+      - !Ref Certificate
+      - !Ref ExistingCertificateArn
+
+  LoadBalancerDnsName:
+    Description: ALB DNS name
+    Value: !GetAtt LoadBalancer.DNSName
+
+  ECSClusterName:
+    Value: !Ref Cluster
+
+  ECSServiceName:
+    Value: !GetAtt Service.Name
+
+  DatabaseEndpoint:
+    Value: !GetAtt Database.Endpoint.Address

@@ -1,0 +1,95 @@
+# Checks that run reliably on GitHub-hosted runners without credentials.
+# No secrets, no deployments, no database migrations, no paid provider calls.
+# Native smoke tests and the gateway integration test need a desktop session or
+# a throwaway Docker stack and are run locally (see docs/TESTING.md).
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  context-guardian-frontend:
+    name: Context Guardian — typecheck and Vitest
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/context-guardian
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/context-guardian/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  context-guardian-rust:
+    name: Context Guardian — Rust tests (macOS)
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: apps/context-guardian
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/context-guardian/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/context-guardian/src-tauri
+      # tauri::generate_context! embeds ../dist, so the frontend must be built first.
+      - run: npm ci
+      - run: npm run build
+      # Ignored tests (real Keychain, real checkpoint file) are not run in CI.
+      - run: cargo test --manifest-path src-tauri/Cargo.toml
+
+  go:
+    name: Go — vet and unit tests (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [gateway, control-plane]
+    defaults:
+      run:
+        working-directory: apps/${{ matrix.service }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache-dependency-path: apps/${{ matrix.service }}/go.sum
+      - run: go vet ./...
+      # Unit tests only; the integration test (build tag "integration") needs
+      # PostgreSQL and Redis and is skipped here.
+      - run: go test -count=1 ./...
+
+  portal-ui:
+    name: Portal UI — typecheck and build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/portal-ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: apps/portal-ui/package-lock.json
+      - run: npm ci
+      - run: npm run build

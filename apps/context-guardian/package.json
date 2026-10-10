@@ -1,0 +1,34 @@
+{
+  "name": "context-guardian",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit -p tsconfig.app.json && vite build",
+    "typecheck": "tsc --noEmit -p tsconfig.app.json && tsc --noEmit -p tsconfig.node.json",
+    "test": "vitest run",
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "smoke": "node scripts/smoke.mjs",
+    "tauri": "tauri",
+    "smoke:memory": "node scripts/smoke-memory.mjs",
+    "smoke:gateway": "node scripts/smoke-gateway.mjs",
+    "test-stack": "bash scripts/gateway-test-stack.sh"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.12.2",
+    "@tauri-apps/plugin-clipboard-manager": "^2.4.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.1",
+    "@types/node": "^22.10.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^6.1.2",
+    "typescript": "^5.6.3",
+    "vite": "^8.3.4",
+    "vitest": "^5.0.3"
+  }
+}
