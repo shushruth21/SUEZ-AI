@@ -14,65 +14,75 @@ import (
 
 const testTenant = "00000000-0000-0000-0000-000000000001"
 
+// asIdentity attaches an identity whose permissions come from the role, the
+// same way resolveJWT builds them.
 func asIdentity(r *http.Request, roles ...string) *http.Request {
 	identity := identityContext{TenantID: testTenant, TenantSlug: "demo", Actor: "someone@example.com", Roles: roles}
+	for _, role := range roles {
+		identity.Scopes = append(identity.Scopes, roleScopes[role]...)
+	}
+	identity.Permissions = permissionsForScopes(identity.Scopes)
 	return r.WithContext(context.WithValue(r.Context(), identityContextKey, identity))
 }
 
-// The app has no database: every case below must be decided before any query,
-// so a nil-pointer panic would also mean the check came too late.
+// serve runs the handler behind the central authorization step, as the real
+// router does. The app has no database: every case below must be decided
+// before any query, so a nil-pointer panic would also mean the check came too
+// late.
 func serve(t *testing.T, handler http.HandlerFunc, r *http.Request) *httptest.ResponseRecorder {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	handler(rec, r)
+	(&controlPlaneApp{}).authorize(handler).ServeHTTP(rec, r)
 	return rec
 }
 
 func TestNonAdminCannotCreateTenants(t *testing.T) {
 	app := &controlPlaneApp{}
-	req := asIdentity(httptest.NewRequest(http.MethodPost, "/api/v1/tenants", strings.NewReader(`{"name":"x","slug":"x"}`)), "user")
-	if rec := serve(t, app.handleTenants, req); rec.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403", rec.Code)
+	for _, role := range []string{"user", "admin", "auditor", "policy-admin", "read-only"} {
+		// Creating tenants needs the platform-admin scope; no tenant role has it.
+		req := asIdentity(httptest.NewRequest(http.MethodPost, "/api/v1/tenants", strings.NewReader(`{"name":"x","slug":"xx"}`)), role)
+		if rec := serve(t, app.handleTenants, req); rec.Code != http.StatusForbidden {
+			t.Fatalf("%s: status = %d, want 403", role, rec.Code)
+		}
 	}
 }
 
-func TestNonAdminCannotCreateAPIKeys(t *testing.T) {
+func TestNonAdminCannotManageAPIKeys(t *testing.T) {
 	app := &controlPlaneApp{}
-	for _, body := range []string{`{"label":"k"}`, `{"label":"k","tenantId":"` + testTenant + `"}`} {
-		req := asIdentity(httptest.NewRequest(http.MethodPost, "/api/v1/api-keys", strings.NewReader(body)), "user")
-		if rec := serve(t, app.handleAPIKeys, req); rec.Code != http.StatusForbidden {
-			t.Fatalf("%s: status = %d, want 403", body, rec.Code)
+	for _, role := range []string{"user", "auditor", "policy-admin", "read-only"} {
+		for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodDelete} {
+			req := asIdentity(httptest.NewRequest(method, "/api/v1/api-keys", strings.NewReader(`{"label":"k","scopes":["read-only"]}`)), role)
+			if rec := serve(t, app.handleAPIKeys, req); rec.Code != http.StatusForbidden {
+				t.Fatalf("%s %s: status = %d, want 403", role, method, rec.Code)
+			}
 		}
 	}
 }
 
 func TestAdminCannotCreateAPIKeysInAnotherTenant(t *testing.T) {
 	app := &controlPlaneApp{}
-	req := asIdentity(httptest.NewRequest(http.MethodPost, "/api/v1/api-keys", strings.NewReader(`{"label":"k","tenantId":"other-tenant"}`)), "admin")
+	req := asIdentity(httptest.NewRequest(http.MethodPost, "/api/v1/api-keys", strings.NewReader(`{"label":"k","scopes":["read-only"],"tenantId":"other-tenant"}`)), "admin")
 	if rec := serve(t, app.handleAPIKeys, req); rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", rec.Code)
 	}
+	rec := serve(t, app.handleAPIKeys, asIdentity(httptest.NewRequest(http.MethodGet, "/api/v1/api-keys?tenantId=other-tenant", nil), "admin"))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("cross-tenant list status = %d, want 403", rec.Code)
+	}
 }
 
-func TestAPIKeyListing(t *testing.T) {
+func TestAPIKeyScopesCannotExceedCreator(t *testing.T) {
 	app := &controlPlaneApp{}
-
-	// Non-admins get an empty list without touching the database.
-	rec := serve(t, app.handleAPIKeys, asIdentity(httptest.NewRequest(http.MethodGet, "/api/v1/api-keys?tenantId=other-tenant", nil), "user"))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("non-admin status = %d, want 200", rec.Code)
+	// A tenant admin does not hold platform-admin, so cannot mint it.
+	req := asIdentity(httptest.NewRequest(http.MethodPost, "/api/v1/api-keys", strings.NewReader(`{"label":"k","scopes":["platform-admin"]}`)), "admin")
+	if rec := serve(t, app.handleAPIKeys, req); rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403: %s", rec.Code, rec.Body.String())
 	}
-	var payload struct {
-		APIKeys []apiKeySummary `json:"apiKeys"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil || payload.APIKeys == nil || len(payload.APIKeys) != 0 {
-		t.Fatalf("non-admin body = %s, want an empty apiKeys array", rec.Body.String())
-	}
-
-	// Admins cannot read another tenant's keys.
-	rec = serve(t, app.handleAPIKeys, asIdentity(httptest.NewRequest(http.MethodGet, "/api/v1/api-keys?tenantId=other-tenant", nil), "admin"))
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("cross-tenant admin status = %d, want 403", rec.Code)
+	for _, body := range []string{`{"label":"k"}`, `{"label":"k","scopes":["root"]}`, `{"label":"k","scopes":["read-only"],"expiresAt":"2001-01-01T00:00:00Z"}`, `{"label":"k","scopes":["read-only"],"rateLimitRpm":-1}`} {
+		req := asIdentity(httptest.NewRequest(http.MethodPost, "/api/v1/api-keys", strings.NewReader(body)), "admin")
+		if rec := serve(t, app.handleAPIKeys, req); rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s: status = %d, want 400", body, rec.Code)
+		}
 	}
 }
 
@@ -118,17 +128,20 @@ func TestTemplatePolicyEscapesTenantAndTarget(t *testing.T) {
 }
 
 func TestBootstrapHidesDemoCredentialsByDefault(t *testing.T) {
-	app := &controlPlaneApp{}
-	t.Setenv("SUEZ_EXPOSE_DEMO_CREDENTIALS", "")
-	rec := serve(t, app.handleBootstrapStatus, httptest.NewRequest(http.MethodGet, "/api/v1/bootstrap/status", nil))
-	if strings.Contains(rec.Body.String(), "demoCredentials") || strings.Contains(rec.Body.String(), "suez-demo-admin-key") {
-		t.Fatalf("demo credentials exposed by default: %s", rec.Body.String())
+	call := func(app *controlPlaneApp) string {
+		rec := httptest.NewRecorder()
+		app.handleBootstrapStatus(rec, httptest.NewRequest(http.MethodGet, "/api/v1/bootstrap/status", nil))
+		return rec.Body.String()
 	}
-
-	t.Setenv("SUEZ_EXPOSE_DEMO_CREDENTIALS", "true")
-	rec = serve(t, app.handleBootstrapStatus, httptest.NewRequest(http.MethodGet, "/api/v1/bootstrap/status", nil))
-	if !strings.Contains(rec.Body.String(), "suez-demo-admin-key") {
-		t.Fatalf("demo credentials missing when enabled: %s", rec.Body.String())
+	if body := call(&controlPlaneApp{}); strings.Contains(body, "demoCredentials") || strings.Contains(body, "suez-demo-admin-key") {
+		t.Fatalf("demo credentials exposed by default: %s", body)
+	}
+	if body := call(&controlPlaneApp{cfg: runtimeConfig{ExposeDemoCredentials: true}}); !strings.Contains(body, "suez-demo-admin-key") {
+		t.Fatalf("demo credentials missing when enabled in development: %s", body)
+	}
+	// Production says nothing about the deployment, whatever else is set.
+	if body := call(&controlPlaneApp{cfg: runtimeConfig{Production: true, ExposeDemoCredentials: true}}); strings.Contains(body, "demo") || strings.Contains(body, "http://") {
+		t.Fatalf("production bootstrap leaks details: %s", body)
 	}
 }
 

@@ -39,6 +39,9 @@ func validateModelRequest(req createModelRequest) error {
 	if err := validateAbsoluteHTTPURL(req.UpstreamBaseURL, true); err != nil {
 		return fmt.Errorf("upstreamBaseUrl: %w", err)
 	}
+	if req.ContextWindow < 0 || req.ContextWindow > 100_000_000 {
+		return errors.New("contextWindow must be between 0 and 100000000")
+	}
 	if req.MaxRPM < 0 || req.MaxTPM < 0 {
 		return errors.New("maxRpm and maxTpm must be greater than or equal to 0")
 	}

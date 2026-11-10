@@ -240,8 +240,11 @@ func (a *controlPlaneApp) runPolicyTests(ctx context.Context, identity identityC
 }
 
 func (a *controlPlaneApp) rollbackPolicy(ctx context.Context, identity identityContext, policyID string) (policyRecord, error) {
-	a.policyMu.Lock()
-	defer a.policyMu.Unlock()
+	unlock, err := a.lockPolicies(ctx)
+	if err != nil {
+		return policyRecord{}, err
+	}
+	defer unlock()
 	return a.rollbackPolicyLocked(ctx, identity, policyID)
 }
 

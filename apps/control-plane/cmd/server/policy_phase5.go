@@ -42,10 +42,6 @@ func (a *controlPlaneApp) handlePolicyGenerate(w http.ResponseWriter, r *http.Re
 		return
 	}
 	identity := mustIdentity(r.Context())
-	if !isAdmin(identity) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin role is required"})
-		return
-	}
 
 	var req generatePolicyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -73,10 +69,6 @@ func (a *controlPlaneApp) handlePolicyGenerate(w http.ResponseWriter, r *http.Re
 
 func (a *controlPlaneApp) handlePolicyActions(w http.ResponseWriter, r *http.Request) {
 	identity := mustIdentity(r.Context())
-	if !isAdmin(identity) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin role is required"})
-		return
-	}
 
 	trimmed := strings.TrimPrefix(path.Clean(r.URL.Path), "/api/v1/policies/")
 	parts := strings.Split(trimmed, "/")
@@ -287,12 +279,15 @@ func (a *controlPlaneApp) validateStoredPolicy(ctx context.Context, identity ide
 	return updated, nil
 }
 
-// publishPolicy holds the policy mutex across the database transition and the
-// OPA sync. OPA does not provide a multi-module transaction, so serialising
+// publishPolicy holds the policy lock (see lockPolicies) across the database
+// transition and the OPA sync. OPA does not provide a multi-module transaction, so serialising
 // writers is essential to keep the desired policy set deterministic.
 func (a *controlPlaneApp) publishPolicy(ctx context.Context, identity identityContext, policyID string) (policyRecord, error) {
-	a.policyMu.Lock()
-	defer a.policyMu.Unlock()
+	unlock, err := a.lockPolicies(ctx)
+	if err != nil {
+		return policyRecord{}, err
+	}
+	defer unlock()
 	return a.publishPolicyLocked(ctx, identity, policyID)
 }
 
@@ -558,8 +553,11 @@ func (a *controlPlaneApp) lookupTenantSlug(ctx context.Context, tenantID string)
 }
 
 func (a *controlPlaneApp) syncPublishedPolicies(ctx context.Context, _ string) error {
-	a.policyMu.Lock()
-	defer a.policyMu.Unlock()
+	unlock, err := a.lockPolicies(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	return a.syncPublishedPoliciesLocked(ctx)
 }
 
