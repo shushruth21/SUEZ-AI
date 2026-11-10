@@ -70,7 +70,7 @@ flowchart TB
 | **Portal UI** | React SPA: landing, sign-in (API key / JWT), Admin and Requester panels. Calls Control Plane and Gateway APIs. |
 | **Control Plane** | Config and governance API: tenants, API keys, access requests/grants, catalog (models, tools), policy lifecycle (draft, test, publish, rollback), audit log. Resolves identity for Gateway. |
 | **Gateway** | Runtime enforcement: identity resolution via Control Plane, grant checks, OPA evaluation, quotas (Redis), response cache (Redis), chat completions and tool execution, audit events. |
-| **OPA** | Policy engine: evaluates allow/deny and reasons for `chat.completions` and `tools.execute` using Rego. |
+| **OPA** | Policy engine: evaluates allow/deny and reasons for `chat.completions` and `tools.execute` using Rego. Tenant policies are loaded into per-tenant packages (`suez.generated.t_<tenant>.p_<policy>`) and the base policy only reads the caller's tenant; drafts are validated and tested in a private `suez.sandbox.*` package. |
 | **Policy LLM** | **Open source LLM** (Ollama, e.g. qwen2.5-coder) for natural-language policy draft generation (used by Control Plane). |
 | **PostgreSQL** | Persistent store: tenants, API keys, models, tools, access requests/grants, policies, policy tests, audit log, tool executions. |
 | **Redis** | **Gateway:** quota counters, chat response cache, request/cache hit stats. **Control plane:** only a TCP health check in Compose (no application data in Redis). |
@@ -102,8 +102,6 @@ flowchart LR
     Edge -->|"/"| Portal
     Edge -->|"/control-plane/*"| CP
     Edge -->|"/gateway/*"| GW
-    Edge -->|"/opa/*"| OPA
-    Edge -->|"/policy-llm/*"| PolicyLLM
     GW --> CP
     GW --> OPA
     GW --> Redis
@@ -117,7 +115,7 @@ flowchart LR
 
 **Startup order (simplified):** Postgres, Redis, OPA, policy-llm → policy-llm-init (must complete) → control-plane → gateway and portal-ui in parallel → **edge** starts after **tls-init** has finished writing certs and the backends above are healthy.
 
-**Ports (defaults):** 5432 (Postgres), 6379 (Redis), 8181 (OPA), 11434 (policy-llm), 8081 (control-plane), 8080 (gateway), 5173 (portal-ui), 5443 (edge HTTPS).
+**Ports (defaults):** 5432 (Postgres), 6379 (Redis), 8181 (OPA, bound to 127.0.0.1), 11434 (policy-llm, bound to 127.0.0.1), 8081 (control-plane), 8080 (gateway), 5173 (portal-ui), 5443 (edge HTTPS).
 
 ---
 
@@ -129,12 +127,12 @@ The Caddy edge strips the path prefix and proxies to the correct backend.
 flowchart LR
     A["/control-plane/api/v1/..."] --> CP[control-plane:8081]
     B["/gateway/v1/..."] --> GW[gateway:8080]
-    C["/opa/..."] --> OPA[opa:8181]
-    D["/policy-llm/..."] --> PL[policy-llm:11434]
+    C["/opa/..., /policy-llm/..."] --> X[404: not routed]
     E["/"] --> Portal[portal-ui:5173]
 ```
 
-- **Portal** is built with `VITE_CONTROL_PLANE_URL` and `VITE_GATEWAY_URL` pointing at the edge (e.g. `https://host:5443/control-plane`, `https://host:5443/gateway`) so the browser talks to the same origin for API calls. The Caddy `handle_path` directives strip `/control-plane`, `/gateway`, `/opa`, and `/policy-llm` before forwarding, so backends see their normal paths (for example `/api/v1/...` on the control plane and `/v1/...` on the gateway).
+- **Portal** is built with `VITE_CONTROL_PLANE_URL` and `VITE_GATEWAY_URL` pointing at the edge (e.g. `https://host:5443/control-plane`, `https://host:5443/gateway`) so the browser talks to the same origin for API calls. The Caddy `handle_path` directives strip `/control-plane` and `/gateway` before forwarding, so backends see their normal paths (for example `/api/v1/...` on the control plane and `/v1/...` on the gateway).
+- **OPA and policy-llm are not routed through the edge.** Neither has authentication: through the edge anyone could `PUT /v1/policies` and replace the authorization policy. Only the control plane and gateway reach them, over `suez-net`. `/control-plane/internal*` is also refused (403).
 - **Direct HTTP** (e.g. portal on 5173, control-plane on 8081, gateway on 8080) is still available for local debugging; defaults omit the edge path prefix.
 
 ---
@@ -209,8 +207,9 @@ sequenceDiagram
         GW->>Client: 429
     end
 
-    GW->>Redis: Get cache key (tenant, model, messages)
+    GW->>Redis: Get cache key (tenant, model, messages, temperature, max_tokens)
     alt Cache HIT
+        GW->>DB: Audit log (allow, cache: hit, traceId)
         GW->>Client: 200 + cached body (X-Suez-Cache: HIT)
     end
 

@@ -101,16 +101,10 @@ func main() {
 	mux.Handle("/v1/observability", protected)
 	mux.Handle("/v1/context/usage", protected)
 
-	server := &http.Server{
-		Addr:              ":" + port,
-		Handler:           withCORS(loggingMiddleware(mux)),
-		ReadHeaderTimeout: 5 * time.Second,
-	}
+	server := newHTTPServer(":"+port, withCORS(loggingMiddleware(withBodyLimit(mux))))
 
 	log.Printf("gateway listening on :%s", port)
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatal(err)
-	}
+	runHTTPServer(server)
 }
 
 func (a *gatewayApp) handleRoot(w http.ResponseWriter, r *http.Request) {
@@ -121,11 +115,11 @@ func (a *gatewayApp) handleRoot(w http.ResponseWriter, r *http.Request) {
 		"routes": []string{
 			"/healthz",
 			"/v1/identity",
-		"/v1/chat/completions",
-		"/v1/tools/execute",
-		"/v1/observability",
-		"/v1/context/usage",
-	},
+			"/v1/chat/completions",
+			"/v1/tools/execute",
+			"/v1/observability",
+			"/v1/context/usage",
+		},
 	})
 }
 
@@ -232,12 +226,22 @@ func withIdentityResolver(next http.Handler) http.Handler {
 		resolverURL := env("AUTH_RESOLVER_URL", "http://control-plane:8081/internal/auth/resolve")
 		payload, err := resolveIdentity(r.Context(), resolverURL, authHeader, xAPIKey)
 		if err != nil {
+			if errors.Is(err, errIdentityServiceUnavailable) {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "identity service unavailable"})
+				return
+			}
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), identityContextKey, payload)))
 	})
 }
+
+// authResolverClient bounds every identity lookup; http.DefaultClient has no
+// timeout, so a hung control plane would otherwise stall every request.
+var authResolverClient = &http.Client{Timeout: 10 * time.Second}
+
+var errIdentityServiceUnavailable = errors.New("identity service unavailable")
 
 func resolveIdentity(ctx context.Context, resolverURL, authHeader, xAPIKey string) (identityContext, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, resolverURL, bytes.NewReader(nil))
@@ -251,13 +255,16 @@ func resolveIdentity(ctx context.Context, resolverURL, authHeader, xAPIKey strin
 		req.Header.Set("X-API-Key", xAPIKey)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := authResolverClient.Do(req)
 	if err != nil {
-		return identityContext{}, err
+		return identityContext{}, fmt.Errorf("%w: %v", errIdentityServiceUnavailable, err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode >= http.StatusInternalServerError {
+		return identityContext{}, errIdentityServiceUnavailable
+	}
+	if resp.StatusCode >= http.StatusBadRequest {
 		var failure map[string]string
 		if err := json.NewDecoder(resp.Body).Decode(&failure); err == nil && failure["error"] != "" {
 			return identityContext{}, errors.New(failure["error"])
@@ -269,7 +276,7 @@ func resolveIdentity(ctx context.Context, resolverURL, authHeader, xAPIKey strin
 		IdentityContext identityContext `json:"identityContext"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return identityContext{}, err
+		return identityContext{}, fmt.Errorf("%w: invalid response", errIdentityServiceUnavailable)
 	}
 	return payload.IdentityContext, nil
 }

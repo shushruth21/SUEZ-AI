@@ -3,9 +3,10 @@
 #
 # Creates only containers named cg-test-* on the network cg-test-net, with a
 # fresh database seeded from infra/db (including 0006). It never touches the
-# suez-* containers, the suez_postgres-data volume or suez-gateway:latest.
-# The gateway is built from apps/gateway as suez-gateway:cg-test and published
-# on 127.0.0.1:${CG_TEST_GATEWAY_PORT:-18080}. Only the free stub model is used.
+# suez-* containers, the suez_postgres-data volume or production-tagged images.
+# Gateway and control plane are built from this worktree as :cg-test and the
+# gateway is published on 127.0.0.1:${CG_TEST_GATEWAY_PORT:-18080}. Only the
+# free stub model is used.
 #
 # Usage: scripts/gateway-test-stack.sh up | down | status
 #        down --purge also removes the test image and Go cache volumes.
@@ -63,11 +64,11 @@ up() {
   running cg-test-opa || docker start cg-test-opa >/dev/null
 
   if ! exists cg-test-control-plane; then
-    docker image inspect suez-control-plane:latest >/dev/null 2>&1 || docker build -q -t suez-control-plane:latest "$REPO_ROOT/apps/control-plane" >/dev/null
+    docker build -q -t suez-control-plane:cg-test "$REPO_ROOT/apps/control-plane" >/dev/null
     docker run -d --name cg-test-control-plane --network "$NET" \
       -e PORT=8081 -e DATABASE_URL="$DB_URL" \
       -e OPA_BASE_URL=http://cg-test-opa:8181 -e OPA_DECISION_URL=http://cg-test-opa:8181/v1/data/suez/authz/decision \
-      suez-control-plane:latest >/dev/null
+      suez-control-plane:cg-test >/dev/null
   fi
   running cg-test-control-plane || docker start cg-test-control-plane >/dev/null
   wait_for control-plane 60 docker exec cg-test-control-plane wget -qO- http://127.0.0.1:8081/
@@ -88,6 +89,7 @@ down() {
   docker network rm "$NET" >/dev/null 2>&1 || true
   if [ "${1:-}" = "--purge" ]; then
     docker image rm suez-gateway:cg-test >/dev/null 2>&1 || true
+    docker image rm suez-control-plane:cg-test >/dev/null 2>&1 || true
     docker volume rm cg-test-gomod cg-test-gocache >/dev/null 2>&1 || true
   fi
   echo "test stack removed"

@@ -43,26 +43,26 @@ type toolRecord struct {
 }
 
 type policyRecord struct {
-	ID                  string `json:"id"`
-	TenantID            string `json:"tenantId"`
-	ParentPolicyID      string `json:"parentPolicyId,omitempty"`
-	Name                string `json:"name"`
-	Scope               string `json:"scope"`
-	TargetName          string `json:"targetName,omitempty"`
-	NaturalLanguageRule string `json:"naturalLanguageRule,omitempty"`
-	GenerationPrompt    string `json:"generationPrompt,omitempty"`
-	GeneratorModel      string `json:"generatorModel,omitempty"`
-	RegoPackage         string `json:"regoPackage"`
-	RegoSource          string `json:"regoSource"`
-	Status              string `json:"status"`
-	Version             int    `json:"version"`
-	Enabled             bool   `json:"enabled"`
+	ID                  string   `json:"id"`
+	TenantID            string   `json:"tenantId"`
+	ParentPolicyID      string   `json:"parentPolicyId,omitempty"`
+	Name                string   `json:"name"`
+	Scope               string   `json:"scope"`
+	TargetName          string   `json:"targetName,omitempty"`
+	NaturalLanguageRule string   `json:"naturalLanguageRule,omitempty"`
+	GenerationPrompt    string   `json:"generationPrompt,omitempty"`
+	GeneratorModel      string   `json:"generatorModel,omitempty"`
+	RegoPackage         string   `json:"regoPackage"`
+	RegoSource          string   `json:"regoSource"`
+	Status              string   `json:"status"`
+	Version             int      `json:"version"`
+	Enabled             bool     `json:"enabled"`
 	ValidationErrors    []string `json:"validationErrors"`
 	PublishedAt         string   `json:"publishedAt,omitempty"`
 	PublishedBy         string   `json:"publishedBy,omitempty"`
 	LastCompiledAt      string   `json:"lastCompiledAt,omitempty"`
-	CreatedAt           string `json:"createdAt"`
-	UpdatedAt           string `json:"updatedAt"`
+	CreatedAt           string   `json:"createdAt"`
+	UpdatedAt           string   `json:"updatedAt"`
 }
 
 type auditEvent struct {
@@ -131,7 +131,7 @@ func (a *controlPlaneApp) handleModels(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		models, err := a.listModels(r.Context(), identity.TenantID)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			writeAppError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -148,20 +148,15 @@ func (a *controlPlaneApp) handleModels(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 			return
 		}
-		if strings.TrimSpace(req.ExternalName) == "" || strings.TrimSpace(req.Provider) == "" || strings.TrimSpace(req.ModelName) == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "externalName, provider, and modelName are required"})
+		req.Provider = strings.ToLower(strings.TrimSpace(req.Provider))
+		if err := validateModelRequest(req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
-		}
-		if req.MaxRPM <= 0 {
-			req.MaxRPM = 60
-		}
-		if req.MaxTPM <= 0 {
-			req.MaxTPM = 120000
 		}
 
 		model, err := a.createModel(r.Context(), identity.TenantID, req)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			writeAppError(w, err)
 			return
 		}
 		_ = a.insertAudit(r.Context(), identity, "model.create", "model", model.ExternalName, "allow", map[string]any{
@@ -183,8 +178,13 @@ func (a *controlPlaneApp) handleTools(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		tools, err := a.listTools(r.Context(), identity.TenantID)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			writeAppError(w, err)
 			return
+		}
+		if !isAdmin(identity) {
+			for index := range tools {
+				tools[index] = redactToolHeaders(tools[index])
+			}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"identityContext": identity,
@@ -198,10 +198,6 @@ func (a *controlPlaneApp) handleTools(w http.ResponseWriter, r *http.Request) {
 		var req createToolRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
-			return
-		}
-		if strings.TrimSpace(req.Name) == "" || strings.TrimSpace(req.Description) == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name and description are required"})
 			return
 		}
 		if strings.TrimSpace(req.ExecutionMode) == "" {
@@ -222,10 +218,16 @@ func (a *controlPlaneApp) handleTools(w http.ResponseWriter, r *http.Request) {
 		if len(req.HTTPHeaders) == 0 {
 			req.HTTPHeaders = json.RawMessage(`{}`)
 		}
+		req.ExecutionMode = strings.ToLower(strings.TrimSpace(req.ExecutionMode))
+		req.RiskTier = strings.ToLower(strings.TrimSpace(req.RiskTier))
+		if err := validateToolRequest(req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
 
 		tool, err := a.createTool(r.Context(), identity.TenantID, req)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			writeAppError(w, err)
 			return
 		}
 		_ = a.insertAudit(r.Context(), identity, "tool.create", "tool", tool.Name, "allow", map[string]any{
@@ -247,7 +249,7 @@ func (a *controlPlaneApp) handlePolicies(w http.ResponseWriter, r *http.Request)
 	case http.MethodGet:
 		policies, err := a.listPolicies(r.Context(), identity.TenantID)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			writeAppError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -275,7 +277,7 @@ func (a *controlPlaneApp) handlePolicies(w http.ResponseWriter, r *http.Request)
 
 		policy, err := a.createPolicy(r.Context(), identity.TenantID, req)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			writeAppError(w, err)
 			return
 		}
 		_ = a.insertAudit(r.Context(), identity, "policy.create", "policy", policy.Name, "allow", map[string]any{
@@ -332,7 +334,7 @@ func (a *controlPlaneApp) handleAuditLog(w http.ResponseWriter, r *http.Request)
 	}
 	events, err := a.listAuditEvents(r.Context(), identity.TenantID, filters)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeAppError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -362,7 +364,7 @@ func (a *controlPlaneApp) handleAuditTrace(w http.ResponseWriter, r *http.Reques
 		Limit:   200,
 	})
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeAppError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{

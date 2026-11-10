@@ -110,7 +110,8 @@ pub fn validate_api_key(key: &str) -> Result<String, String> {
 }
 
 /// Accepts http(s)://host[:port][/path-prefix]; rejects credentials, queries
-/// and fragments so nothing sensitive can hide in the URL.
+/// and fragments so nothing sensitive can hide in the URL. Plain http is only
+/// allowed for loopback hosts, because every request carries the API key.
 pub fn normalize_base_url(raw: &str) -> Result<String, String> {
     let parsed = url::Url::parse(raw.trim()).map_err(|_| "gateway URL is not a valid URL".to_string())?;
     if parsed.scheme() != "http" && parsed.scheme() != "https" {
@@ -119,6 +120,9 @@ pub fn normalize_base_url(raw: &str) -> Result<String, String> {
     if parsed.host_str().is_none() {
         return Err("gateway URL has no host".into());
     }
+    if parsed.scheme() == "http" && !is_loopback_host(&parsed) {
+        return Err("gateway URL must use https:// for non-local hosts; the API key would otherwise be sent unencrypted".into());
+    }
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err("gateway URL must not contain credentials; store the API key separately".into());
     }
@@ -126,6 +130,18 @@ pub fn normalize_base_url(raw: &str) -> Result<String, String> {
         return Err("gateway URL must not contain a query or fragment".into());
     }
     Ok(parsed.as_str().trim_end_matches('/').to_string())
+}
+
+fn is_loopback_host(url: &url::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(name)) => {
+            let name = name.trim_end_matches('.').to_ascii_lowercase();
+            name == "localhost" || name.ends_with(".localhost")
+        }
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
 }
 
 /// Mirrors the gateway's GET /v1/context/usage response.
@@ -370,7 +386,20 @@ mod tests {
     fn normalizes_and_rejects_base_urls() {
         assert_eq!(normalize_base_url("http://localhost:8080/").unwrap(), "http://localhost:8080");
         assert_eq!(normalize_base_url(" https://host:5443/gateway/ ").unwrap(), "https://host:5443/gateway");
-        for bad in ["", "localhost:8080", "ftp://host", "http://user:pw@host", "http://host/?q=1", "http://host/#x"] {
+        assert_eq!(normalize_base_url("http://127.0.0.1:8080").unwrap(), "http://127.0.0.1:8080");
+        assert_eq!(normalize_base_url("http://[::1]:8080").unwrap(), "http://[::1]:8080");
+        assert_eq!(normalize_base_url("http://suez.localhost:8080").unwrap(), "http://suez.localhost:8080");
+        for bad in [
+            "",
+            "localhost:8080",
+            "ftp://host",
+            "https://user:pw@host",
+            "https://host/?q=1",
+            "https://host/#x",
+            "http://host:8080",
+            "http://192.168.1.20:8080",
+            "http://localhost.evil.com",
+        ] {
             assert!(normalize_base_url(bad).is_err(), "{bad:?} should be rejected");
         }
     }

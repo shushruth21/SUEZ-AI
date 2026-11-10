@@ -4,6 +4,7 @@ import { GatewayIdentity } from "../api";
 import { validateGuardConfig } from "../guardian/threshold";
 import { GuardianSettings, UsageSourceKind } from "../types";
 import { GatewayResult } from "../usage/gatewayReading";
+import { gatewayUrlProblem } from "../usage/gatewayUrl";
 
 type Props = {
   settings: GuardianSettings;
@@ -66,8 +67,9 @@ export function SettingsPanel(props: Props) {
     if (!Number.isFinite(next.pollIntervalSeconds) || next.pollIntervalSeconds < 1 || next.pollIntervalSeconds > 300) {
       problems.push("Poll interval must be between 1 and 300 seconds.");
     }
-    if (next.usageSource === "gateway" && !/^https?:\/\/\S+$/.test(next.gatewayUrl)) {
-      problems.push("Gateway URL must start with http:// or https://.");
+    if (next.usageSource === "gateway") {
+      const urlProblem = gatewayUrlProblem(next.gatewayUrl);
+      if (urlProblem) problems.push(urlProblem);
     }
     setErrors(problems);
     if (problems.length > 0) return;

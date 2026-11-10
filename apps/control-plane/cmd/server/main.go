@@ -16,6 +16,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -118,6 +119,7 @@ type decisionRequest struct {
 type controlPlaneApp struct {
 	db         *sql.DB
 	httpClient *http.Client
+	policyMu   sync.Mutex
 }
 
 type dbExecutor interface {
@@ -168,16 +170,10 @@ func main() {
 	mux.Handle("/api/v1/audit-log", app.withIdentity(http.HandlerFunc(app.handleAuditLog)))
 	mux.HandleFunc("/internal/tools/http-echo", app.handleHTTPToolEcho)
 
-	server := &http.Server{
-		Addr:              ":" + port,
-		Handler:           withCORS(loggingMiddleware(mux)),
-		ReadHeaderTimeout: 5 * time.Second,
-	}
+	server := newHTTPServer(":"+port, withCORS(loggingMiddleware(withBodyLimit(mux))))
 
 	log.Printf("control-plane listening on :%s", port)
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatal(err)
-	}
+	runHTTPServer(server)
 }
 
 func (a *controlPlaneApp) handleRoot(w http.ResponseWriter, r *http.Request) {
@@ -239,7 +235,7 @@ func (a *controlPlaneApp) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *controlPlaneApp) handleBootstrapStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
+	body := map[string]any{
 		"services": map[string]string{
 			"gateway":      env("GATEWAY_BASE_URL", "http://gateway:8080"),
 			"controlPlane": env("CONTROL_PLANE_BASE_URL", "http://control-plane:8081"),
@@ -256,7 +252,11 @@ func (a *controlPlaneApp) handleBootstrapStatus(w http.ResponseWriter, r *http.R
 			"https edge routing and file-backed local secret loading",
 			"backup and restore scripts for local configuration and audit data",
 		},
-		"demoCredentials": map[string]string{
+	}
+	// This endpoint is unauthenticated, so demo credentials are only handed out
+	// when explicitly enabled for a local demo.
+	if demoCredentialsExposed() {
+		body["demoCredentials"] = map[string]string{
 			"apiKey":          "suez-demo-admin-key",
 			"requesterJwt":    buildUnsignedDemoJWT("requester@example.com", "user"),
 			"adminJwt":        buildUnsignedDemoJWT("admin@example.com", "admin"),
@@ -264,13 +264,26 @@ func (a *controlPlaneApp) handleBootstrapStatus(w http.ResponseWriter, r *http.R
 			"openaiDemoModel": "openai-gpt-4o-mini",
 			"stubTool":        "weather.lookup",
 			"httpTool":        "http.echo",
-		},
-	})
+		}
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+func demoCredentialsExposed() bool {
+	switch strings.ToLower(strings.TrimSpace(env("SUEZ_EXPOSE_DEMO_CREDENTIALS", ""))) {
+	case "1", "true", "yes":
+		return true
+	}
+	return false
 }
 
 func (a *controlPlaneApp) handleAuthResolve(w http.ResponseWriter, r *http.Request) {
 	identity, err := a.resolveIdentityFromRequest(r)
 	if err != nil {
+		if errors.Is(err, errAuthenticationServiceUnavailable) {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "authentication service unavailable"})
+			return
+		}
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
 		return
 	}
@@ -287,37 +300,56 @@ func (a *controlPlaneApp) handleAuthSession(w http.ResponseWriter, r *http.Reque
 }
 
 func (a *controlPlaneApp) handleTenants(w http.ResponseWriter, r *http.Request) {
+	identity := mustIdentity(r.Context())
 	switch r.Method {
 	case http.MethodGet:
-		tenants, err := a.listTenants(r.Context())
+		// Non-admins only ever see their own tenant.
+		var (
+			tenants []tenant
+			err     error
+		)
+		if isAdmin(identity) {
+			tenants, err = a.listTenants(r.Context())
+		} else {
+			var own tenant
+			own, err = a.getTenantByID(r.Context(), identity.TenantID)
+			if err == nil {
+				tenants = []tenant{own}
+			} else if errors.Is(err, sql.ErrNoRows) {
+				tenants, err = []tenant{}, nil
+			}
+		}
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			writeAppError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"identityContext": mustIdentity(r.Context()),
+			"identityContext": identity,
 			"tenants":         tenants,
 		})
 	case http.MethodPost:
+		if !isAdmin(identity) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin role is required"})
+			return
+		}
 		var req createTenantRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 			return
 		}
-		if strings.TrimSpace(req.Name) == "" || strings.TrimSpace(req.Slug) == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name and slug are required"})
-			return
-		}
 		if strings.TrimSpace(req.Environment) == "" {
 			req.Environment = "dev"
+		}
+		if err := validateTenantRequest(req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
 		}
 
 		created, err := a.createTenant(r.Context(), req)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			writeAppError(w, err)
 			return
 		}
-		identity := mustIdentity(r.Context())
 		_ = a.insertAudit(r.Context(), identity, "tenant.create", "tenant", created.Slug, "allow", map[string]any{
 			"tenantId": created.ID,
 		})
@@ -334,13 +366,24 @@ func (a *controlPlaneApp) handleAPIKeys(w http.ResponseWriter, r *http.Request) 
 	identity := mustIdentity(r.Context())
 	switch r.Method {
 	case http.MethodGet:
-		tenantID := r.URL.Query().Get("tenantId")
-		if tenantID == "" {
-			tenantID = identity.TenantID
+		// API keys carry the admin role, so only admins may see them, and only
+		// for their own tenant. Non-admins get an empty list (the portal loads
+		// this endpoint for every user).
+		if !isAdmin(identity) {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"identityContext": identity,
+				"apiKeys":         []apiKeySummary{},
+			})
+			return
+		}
+		tenantID, ok := sameTenant(identity, r.URL.Query().Get("tenantId"))
+		if !ok {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "api keys can only be listed for your own tenant"})
+			return
 		}
 		apiKeys, err := a.listAPIKeys(r.Context(), tenantID)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			writeAppError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -348,6 +391,10 @@ func (a *controlPlaneApp) handleAPIKeys(w http.ResponseWriter, r *http.Request) 
 			"apiKeys":         apiKeys,
 		})
 	case http.MethodPost:
+		if !isAdmin(identity) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin role is required"})
+			return
+		}
 		var req createAPIKeyRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
@@ -357,13 +404,16 @@ func (a *controlPlaneApp) handleAPIKeys(w http.ResponseWriter, r *http.Request) 
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "label is required"})
 			return
 		}
-		if req.TenantID == "" {
-			req.TenantID = identity.TenantID
+		tenantID, ok := sameTenant(identity, req.TenantID)
+		if !ok {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "api keys can only be created for your own tenant"})
+			return
 		}
+		req.TenantID = tenantID
 
 		summary, rawKey, err := a.createAPIKey(r.Context(), req)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			writeAppError(w, err)
 			return
 		}
 		_ = a.insertAudit(r.Context(), identity, "api_key.create", "api_key", summary.Label, "allow", map[string]any{
@@ -387,7 +437,7 @@ func (a *controlPlaneApp) handleAccessRequests(w http.ResponseWriter, r *http.Re
 	case http.MethodGet:
 		requests, err := a.listAccessRequests(r.Context(), identity, strings.TrimSpace(r.URL.Query().Get("status")))
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			writeAppError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -400,10 +450,6 @@ func (a *controlPlaneApp) handleAccessRequests(w http.ResponseWriter, r *http.Re
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 			return
 		}
-		if strings.TrimSpace(req.ResourceType) == "" || strings.TrimSpace(req.ResourceName) == "" || strings.TrimSpace(req.Justification) == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "resourceType, resourceName, and justification are required"})
-			return
-		}
 		if req.Subject == "" {
 			req.Subject = identity.Actor
 		}
@@ -411,10 +457,14 @@ func (a *controlPlaneApp) handleAccessRequests(w http.ResponseWriter, r *http.Re
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "non-admin users can only create requests for themselves"})
 			return
 		}
+		if err := validateAccessRequest(req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
 
 		created, err := a.createAccessRequest(r.Context(), identity, req)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			writeAppError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusCreated, map[string]any{
@@ -457,7 +507,7 @@ func (a *controlPlaneApp) handleAccessRequestActions(w http.ResponseWriter, r *h
 	case "approve":
 		updated, grant, err := a.approveAccessRequest(r.Context(), identity, parts[0], strings.TrimSpace(req.Reason))
 		if err != nil {
-			writeJSON(w, statusCodeForError(err), map[string]string{"error": err.Error()})
+			writeAppError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -468,7 +518,7 @@ func (a *controlPlaneApp) handleAccessRequestActions(w http.ResponseWriter, r *h
 	case "deny":
 		updated, err := a.denyAccessRequest(r.Context(), identity, parts[0], strings.TrimSpace(req.Reason))
 		if err != nil {
-			writeJSON(w, statusCodeForError(err), map[string]string{"error": err.Error()})
+			writeAppError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -489,7 +539,7 @@ func (a *controlPlaneApp) handleAccessGrants(w http.ResponseWriter, r *http.Requ
 	identity := mustIdentity(r.Context())
 	grants, err := a.listAccessGrants(r.Context(), identity)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeAppError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -502,6 +552,10 @@ func (a *controlPlaneApp) withIdentity(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		identity, err := a.resolveIdentityFromRequest(r)
 		if err != nil {
+			if errors.Is(err, errAuthenticationServiceUnavailable) {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "authentication service unavailable"})
+				return
+			}
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
 			return
 		}
@@ -522,25 +576,25 @@ func (a *controlPlaneApp) resolveIdentityFromRequest(r *http.Request) (identityC
 
 	switch {
 	case strings.HasPrefix(strings.ToLower(authHeader), "apikey "):
-		return a.resolveAPIKey(strings.TrimSpace(authHeader[len("ApiKey "):]))
+		return a.resolveAPIKey(r.Context(), strings.TrimSpace(authHeader[len("ApiKey "):]))
 	case strings.HasPrefix(strings.ToLower(authHeader), "bearer "):
 		token := strings.TrimSpace(authHeader[len("Bearer "):])
 		if strings.Count(token, ".") == 2 {
-			return a.resolveJWT(token)
+			return a.resolveJWT(r.Context(), token)
 		}
-		return a.resolveAPIKey(token)
+		return a.resolveAPIKey(r.Context(), token)
 	default:
-		return a.resolveAPIKey(authHeader)
+		return a.resolveAPIKey(r.Context(), authHeader)
 	}
 }
 
-func (a *controlPlaneApp) resolveAPIKey(rawKey string) (identityContext, error) {
+func (a *controlPlaneApp) resolveAPIKey(ctx context.Context, rawKey string) (identityContext, error) {
 	if rawKey == "" {
 		return identityContext{}, errors.New("empty api key")
 	}
 	hashed := hashAPIKey(rawKey)
 
-	row := a.db.QueryRowContext(context.Background(), `
+	row := a.db.QueryRowContext(ctx, `
 		select ak.id, ak.label, t.id, t.slug, t.name
 		from api_keys ak
 		join tenants t on t.id = ak.tenant_id
@@ -553,7 +607,7 @@ func (a *controlPlaneApp) resolveAPIKey(rawKey string) (identityContext, error) 
 		if errors.Is(err, sql.ErrNoRows) {
 			return identityContext{}, errors.New("invalid api key")
 		}
-		return identityContext{}, err
+		return identityContext{}, fmt.Errorf("%w: %v", errAuthenticationServiceUnavailable, err)
 	}
 
 	return identityContext{
@@ -568,7 +622,7 @@ func (a *controlPlaneApp) resolveAPIKey(rawKey string) (identityContext, error) 
 	}, nil
 }
 
-func (a *controlPlaneApp) resolveJWT(token string) (identityContext, error) {
+func (a *controlPlaneApp) resolveJWT(ctx context.Context, token string) (identityContext, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
 		return identityContext{}, errors.New("invalid jwt format")
@@ -584,29 +638,14 @@ func (a *controlPlaneApp) resolveJWT(token string) (identityContext, error) {
 		return identityContext{}, errors.New("invalid jwt claims")
 	}
 
-	tenantID := claimString(claims, "tenant_id", "tid")
-	tenantSlug := claimString(claims, "tenant_slug", "tenant")
-	tenantName := claimString(claims, "tenant_name")
-	if tenantSlug != "" {
-		if tenant, lookupErr := a.getTenantBySlug(context.Background(), tenantSlug); lookupErr == nil {
-			if tenantID == "" {
-				tenantID = tenant.ID
-			}
-			if tenantName == "" {
-				tenantName = tenant.Name
-			}
-		}
+	// The tenant always comes from the database, never from free-form claims:
+	// the tenant ID ends up in SQL filters and generated Rego, and an unknown
+	// or mismatched tenant must not produce a usable identity.
+	resolved, err := a.resolveJWTTenant(ctx, claimString(claims, "tenant_id", "tid"), claimString(claims, "tenant_slug", "tenant"))
+	if err != nil {
+		return identityContext{}, err
 	}
-	if tenantID == "" && tenantSlug == "" {
-		if demo, demoErr := a.getTenantBySlug(context.Background(), "demo"); demoErr == nil {
-			tenantID = demo.ID
-			tenantSlug = demo.Slug
-			tenantName = demo.Name
-		}
-	}
-	if tenantID == "" && tenantSlug == "" {
-		return identityContext{}, errors.New("jwt is missing tenant scope")
-	}
+	tenantID, tenantSlug, tenantName := resolved.ID, resolved.Slug, resolved.Name
 
 	subject := claimString(claims, "sub", "preferred_username", "email")
 	if subject == "" {
@@ -671,6 +710,62 @@ func (a *controlPlaneApp) getTenantBySlug(ctx context.Context, slug string) (ten
 	var item tenant
 	err := row.Scan(&item.ID, &item.Name, &item.Slug, &item.Environment)
 	return item, err
+}
+
+func (a *controlPlaneApp) getTenantByID(ctx context.Context, id string) (tenant, error) {
+	row := a.db.QueryRowContext(ctx, `
+		select id, name, slug, environment
+		from tenants
+		where id::text = $1
+		limit 1
+	`, id)
+	var item tenant
+	err := row.Scan(&item.ID, &item.Name, &item.Slug, &item.Environment)
+	return item, err
+}
+
+// resolveJWTTenant maps the tenant claims onto a stored tenant. With no tenant
+// claims at all the local demo tenant is used, as before.
+func (a *controlPlaneApp) resolveJWTTenant(ctx context.Context, claimID, claimSlug string) (tenant, error) {
+	claimID, claimSlug = strings.TrimSpace(claimID), strings.TrimSpace(claimSlug)
+	var (
+		found tenant
+		err   error
+	)
+	switch {
+	case claimID != "":
+		found, err = a.getTenantByID(ctx, claimID)
+	case claimSlug != "":
+		found, err = a.getTenantBySlug(ctx, claimSlug)
+	default:
+		found, err = a.getTenantBySlug(ctx, "demo")
+		if errors.Is(err, sql.ErrNoRows) {
+			return tenant{}, errors.New("jwt is missing tenant scope")
+		}
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return tenant{}, errors.New("jwt tenant is unknown")
+	}
+	if err != nil {
+		if dbStatus(err) == http.StatusNotFound {
+			return tenant{}, errors.New("jwt tenant is unknown")
+		}
+		return tenant{}, fmt.Errorf("%w: %v", errAuthenticationServiceUnavailable, err)
+	}
+	if claimID != "" && claimSlug != "" && !strings.EqualFold(found.Slug, claimSlug) {
+		return tenant{}, errors.New("jwt tenant_id and tenant_slug do not match")
+	}
+	return found, nil
+}
+
+// sameTenant returns the caller's tenant when requested is empty or equal to
+// it; any other tenant is refused.
+func sameTenant(identity identityContext, requested string) (string, bool) {
+	requested = strings.TrimSpace(requested)
+	if requested == "" || requested == identity.TenantID {
+		return identity.TenantID, identity.TenantID != ""
+	}
+	return "", false
 }
 
 func (a *controlPlaneApp) createTenant(ctx context.Context, req createTenantRequest) (tenant, error) {
@@ -1098,14 +1193,20 @@ func buildUnsignedDemoJWT(subject, role string) string {
 }
 
 func statusCodeForError(err error) int {
+	if status := dbStatus(err); status != 0 {
+		return status
+	}
 	switch err.Error() {
-	case "access request not found":
+	case "access request not found", "policy not found":
 		return http.StatusNotFound
 	case "admin role is required":
 		return http.StatusForbidden
-	case "only pending requests can be approved", "only pending requests can be denied":
+	case "only pending requests can be approved", "only pending requests can be denied", "policy validation failed; review the draft before publishing", "policy must include at least one test case before publish", "policy tests must pass before publish":
 		return http.StatusConflict
 	default:
+		if strings.HasPrefix(err.Error(), "cannot rollback to a draft") {
+			return http.StatusConflict
+		}
 		return http.StatusInternalServerError
 	}
 }

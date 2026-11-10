@@ -40,21 +40,48 @@ high_risk_tool if {
     lower(object.get(input.resource, "riskTier", "")) == "high"
 }
 
-published_policy_results contains result if {
-    false
-    result := {"policyId": "", "allow": false, "reason": ""}
+tenant_package := sprintf("t_%s", [replace(input.identity.tenantId, "-", "_")])
+
+sandbox_module := object.get(object.get(input, "sandbox", {}), "module", "")
+
+sandbox_enabled if {
+    sandbox_module != ""
+}
+
+# Live requests only read the caller's tenant package. A generated module
+# cannot add rules to this base package, and therefore cannot affect another
+# tenant or bypass the resource/identity checks below.
+generated_matches contains result if {
+    not sandbox_enabled
+    tenant_pkg := tenant_package
+    module := data.suez.generated[tenant_pkg][_]
+    result := module.published_policy_results[_]
+}
+
+# Test requests use a private sandbox module. Published policies remain in
+# effect except for the explicitly excluded policy package(s) that the draft
+# replaces for its scope and target.
+generated_matches contains result if {
+    sandbox_enabled
+    tenant_pkg := tenant_package
+    some module_key
+    module := data.suez.generated[tenant_pkg][module_key]
+    not object.get(object.get(input.sandbox, "exclude", {}), module_key, false)
+    result := module.published_policy_results[_]
 }
 
 generated_matches contains result if {
-    result := published_policy_results[_]
+    sandbox_enabled
+    module := data.suez.sandbox[sandbox_module]
+    result := module.published_policy_results[_]
 }
 
 generated_policy_applies if {
-    count([result | result := published_policy_results[_]]) > 0
+    count([result | result := generated_matches[_]]) > 0
 }
 
 generated_policy_denied if {
-    result := published_policy_results[_]
+    result := generated_matches[_]
     result.allow == false
 }
 
@@ -112,7 +139,7 @@ reasons contains "admin_required_for_high_risk_tool" if {
 }
 
 reasons contains reason if {
-    result := published_policy_results[_]
+    result := generated_matches[_]
     result.allow == false
     reason := object.get(result, "reason", "published_policy_denied")
 }

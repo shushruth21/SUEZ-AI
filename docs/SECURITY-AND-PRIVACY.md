@@ -72,15 +72,34 @@ key travels in clear text.
 - Context-usage measurements are only returned to the **same tenant and
   actor** that created them.
 - API keys are stored hashed (SHA-256).
+- Tenants and API keys: non-admins see only their own tenant and cannot create
+  tenants or keys; admins manage keys only in their own tenant. A JWT's tenant
+  must exist in the database and `tenant_id`/`tenant_slug` must agree.
+- Tenant IDs and resource names are JSON-escaped when written into generated
+  Rego, so they cannot inject policy logic.
+- Tenant policies are isolated in OPA: each published policy is loaded into
+  `suez.generated.t_<tenant>.p_<policy>` and the base policy only consults the
+  caller's tenant, so a tenant admin cannot write Rego that affects another
+  tenant or overrides the base checks (identity, enabled resource, high-risk
+  tools). Drafts are validated and tested in a private sandbox package, never
+  in the live policy set.
+- Tool `httpHeaders` (which may hold upstream tokens) are only shown to admins.
+- Request bodies are size-limited (`MAX_REQUEST_BODY_BYTES`; 8 MiB gateway,
+  1 MiB control plane) and both services set read/write/idle timeouts.
+- Provider and tool error bodies are kept in logs and the audit log; API
+  callers get a short message and a `traceId`.
+- Context Guardian sends its API key over plain `http://` only to loopback
+  hosts; any other gateway must use `https://`.
 
 ### Known limitations (local-development runtime)
 
 | Limitation | Risk | Mitigation |
 | --- | --- | --- |
 | **JWT signatures are not verified** — claims are decoded only | Anyone who can reach the API can impersonate any user with a crafted JWT | Never expose the stack to untrusted networks; implement verification before any shared deployment |
-| Demo API key and demo identities are seeded (`suez-demo-admin-key`, `*@example.com`) | Well-known admin credential | Local use only; create new keys and remove demo data for anything shared |
+| Demo API key and demo identities are seeded (`suez-demo-admin-key`, `*@example.com`) | Well-known admin credential | Local use only; create new keys and remove demo data for anything shared. The unauthenticated bootstrap endpoint only returns them when `SUEZ_EXPOSE_DEMO_CREDENTIALS=true` |
+| Every API key resolves to the `admin` role of its tenant | Key holders are tenant admins | Only admins can create or list keys, and only in their own tenant; treat keys as admin credentials |
 | Default DB password `suez` | Trivial DB access if the port is reachable | Set `POSTGRES_PASSWORD` in `.env` |
-| All ports published on `0.0.0.0` | Services reachable from the local network | Bind to `127.0.0.1` or firewall |
+| Postgres, Redis, gateway, control plane and portal ports published on `0.0.0.0` | Services reachable from the local network | Bind to `127.0.0.1` or firewall. OPA and policy-llm (unauthenticated) bind to `127.0.0.1` by default and are not routed through the edge |
 | `Access-Control-Allow-Origin: *` on gateway and control plane | Any website can call the APIs from a browser that holds credentials | Restrict origins before sharing |
 | Self-signed / locally trusted TLS on the edge; internal traffic is plain HTTP | Not suitable beyond a single machine | Use real certificates and TLS between services |
 | Chat messages are forwarded to external providers for provider-backed models; responses are cached in Redis for 60 s | Prompt content leaves the machine / persists briefly | Use the stub or local models for sensitive data |

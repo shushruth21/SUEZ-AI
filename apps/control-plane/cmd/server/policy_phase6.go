@@ -28,18 +28,18 @@ type policyTestCase struct {
 }
 
 type policyTestRun struct {
-	ID           string          `json:"id"`
-	PolicyID     string          `json:"policyId"`
-	TenantID     string          `json:"tenantId"`
-	InitiatedBy  string          `json:"initiatedBy"`
-	Status       string          `json:"status"`
-	TotalCount   int             `json:"totalCount"`
-	PassedCount  int             `json:"passedCount"`
-	FailedCount  int             `json:"failedCount"`
-	Results      json.RawMessage `json:"results"`
-	StartedAt    string          `json:"startedAt"`
-	CompletedAt  string          `json:"completedAt,omitempty"`
-	CreatedAt    string          `json:"createdAt"`
+	ID          string          `json:"id"`
+	PolicyID    string          `json:"policyId"`
+	TenantID    string          `json:"tenantId"`
+	InitiatedBy string          `json:"initiatedBy"`
+	Status      string          `json:"status"`
+	TotalCount  int             `json:"totalCount"`
+	PassedCount int             `json:"passedCount"`
+	FailedCount int             `json:"failedCount"`
+	Results     json.RawMessage `json:"results"`
+	StartedAt   string          `json:"startedAt"`
+	CompletedAt string          `json:"completedAt,omitempty"`
+	CreatedAt   string          `json:"createdAt"`
 }
 
 type createPolicyTestCaseRequest struct {
@@ -240,6 +240,12 @@ func (a *controlPlaneApp) runPolicyTests(ctx context.Context, identity identityC
 }
 
 func (a *controlPlaneApp) rollbackPolicy(ctx context.Context, identity identityContext, policyID string) (policyRecord, error) {
+	a.policyMu.Lock()
+	defer a.policyMu.Unlock()
+	return a.rollbackPolicyLocked(ctx, identity, policyID)
+}
+
+func (a *controlPlaneApp) rollbackPolicyLocked(ctx context.Context, identity identityContext, policyID string) (policyRecord, error) {
 	source, err := a.getPolicy(ctx, identity.TenantID, policyID)
 	if err != nil {
 		return policyRecord{}, err
@@ -292,7 +298,7 @@ func (a *controlPlaneApp) rollbackPolicy(ctx context.Context, identity identityC
 			return policyRecord{}, err
 		}
 	}
-	updated, err := a.publishPolicy(ctx, identity, cloned.ID)
+	updated, err := a.publishPolicyLocked(ctx, identity, cloned.ID)
 	if err != nil {
 		return policyRecord{}, err
 	}
@@ -310,26 +316,28 @@ func (a *controlPlaneApp) runPolicyTestsWithSimulatedPublish(ctx context.Context
 	if err != nil {
 		return err
 	}
-	effectivePolicies := make([]policyRecord, 0, len(currentPublished)+1)
+	// A draft is compiled into a private OPA package. The base policy's sandbox
+	// branch combines it with the live policies that do not share its scope and
+	// target, so no test ever replaces or deletes the live policy set.
+	excluded := make(map[string]bool)
 	for _, published := range currentPublished {
 		if published.Scope == policy.Scope && strings.TrimSpace(published.TargetName) == strings.TrimSpace(policy.TargetName) {
-			continue
+			excluded[policyPackageKey(published.ID)] = true
 		}
-		effectivePolicies = append(effectivePolicies, published)
 	}
-	simulated := policy
-	simulated.Status = "published"
-	effectivePolicies = append(effectivePolicies, simulated)
-
-	if err := a.applyManagedPolicySet(ctx, effectivePolicies); err != nil {
+	key := newSandboxKey()
+	source, err := sandboxModuleSource(key, policy.RegoSource)
+	if err != nil {
 		return err
 	}
-	defer func() {
-		_ = a.syncPublishedPolicies(ctx, "")
-	}()
+	modulePath := opaSandboxPath(key)
+	if err := a.putOPAModule(ctx, modulePath, sandboxPackage(key), source); err != nil {
+		return err
+	}
+	defer func() { _ = a.deleteOPAPolicy(context.WithoutCancel(ctx), modulePath) }()
 
 	for _, testCase := range testCases {
-		decision, err := a.evaluatePolicyInput(ctx, testCase)
+		decision, err := a.evaluatePolicyInput(ctx, testCase, policy.TenantID, key, excluded)
 		if err != nil {
 			return err
 		}
@@ -428,31 +436,19 @@ func (a *controlPlaneApp) listPublishedPoliciesForTenant(ctx context.Context, te
 	return policies, rows.Err()
 }
 
-func (a *controlPlaneApp) applyManagedPolicySet(ctx context.Context, policies []policyRecord) error {
-	existingIDs, err := a.listManagedOPAPolicies(ctx)
-	if err != nil {
-		return err
-	}
-	for _, existing := range existingIDs {
-		if err := a.deleteOPAPolicy(ctx, existing); err != nil {
-			return err
-		}
-	}
-	for _, policy := range policies {
-		if err := a.putOPAPolicy(ctx, policy.ID, policy.RegoSource); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (a *controlPlaneApp) evaluatePolicyInput(ctx context.Context, testCase policyTestCase) (opaDecision, error) {
+func (a *controlPlaneApp) evaluatePolicyInput(ctx context.Context, testCase policyTestCase, tenantID, sandboxKey string, excluded map[string]bool) (opaDecision, error) {
 	var identity map[string]any
 	if len(testCase.Identity) > 0 {
 		if err := json.Unmarshal(testCase.Identity, &identity); err != nil {
 			return opaDecision{}, err
 		}
 	}
+	if identity == nil {
+		identity = map[string]any{}
+	}
+	// Test cases are tenant-scoped fixtures. Never let a saved payload trick a
+	// sandbox evaluation into another tenant's generated namespace.
+	identity["tenantId"] = tenantID
 	var resource map[string]any
 	if len(testCase.Resource) > 0 {
 		if err := json.Unmarshal(testCase.Resource, &resource); err != nil {
@@ -472,6 +468,10 @@ func (a *controlPlaneApp) evaluatePolicyInput(ctx context.Context, testCase poli
 			"identity": identity,
 			"resource": resource,
 			"request":  requestPayload,
+			"sandbox": map[string]any{
+				"module":  sandboxKey,
+				"exclude": excluded,
+			},
 		},
 	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(env("OPA_DECISION_URL", "http://opa:8181/v1/data/suez/authz/decision"), "/"), strings.NewReader(string(body)))
@@ -594,4 +594,3 @@ func fallbackString(value, fallback string) string {
 	}
 	return fallback
 }
-

@@ -17,12 +17,16 @@ https://{$EDGE_HOST}:{$EDGE_HTTPS_PORT} {
 		reverse_proxy gateway:8080
 	}
 
-	handle_path /opa/* {
-		reverse_proxy opa:8181
+	# OPA and Ollama have no authentication: through the edge, anyone could
+	# PUT /v1/policies and replace the authorization policy, or drive the
+	# local model. Only the control plane and gateway talk to them, over the
+	# internal network, so they are not routed here.
+	handle /opa* {
+		respond 404
 	}
 
-	handle_path /policy-llm/* {
-		reverse_proxy policy-llm:11434
+	handle /policy-llm* {
+		respond 404
 	}
 
 	handle {
