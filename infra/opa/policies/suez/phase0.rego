@@ -5,6 +5,7 @@ default allow := false
 supported_actions := {
     "chat.completions",
     "tools.execute",
+    "memory.inject",
 }
 
 supported_action if {
@@ -28,6 +29,14 @@ resource_shape_valid if {
 resource_shape_valid if {
     input.action == "tools.execute"
     input.resource.type == "tool"
+}
+
+# Carrying an approved checkpoint into a chat request. The memory service
+# checks ownership, approval and tenant settings; a tenant policy can deny it
+# here like any other action.
+resource_shape_valid if {
+    input.action == "memory.inject"
+    input.resource.type == "checkpoint"
 }
 
 is_admin if {
