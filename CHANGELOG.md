@@ -9,6 +9,51 @@ earlier history is summarised rather than itemised.
 
 ## [Unreleased]
 
+### Production readiness (branch `hardening/production-readiness`)
+
+Security and identity
+- JWT verification against an OIDC provider (JWKS discovery, issuer,
+  audience, asymmetric algorithm allowlist, exp/nbf/iat with skew, key
+  rotation, fail closed). Tokens bind to stored users; roles come from the
+  database.
+- Scoped, expirable, revocable, attributable API keys with model/tool
+  allowlists and per-key rate limits; keys cannot grant more than their
+  creator holds. `control-plane bootstrap` creates the first tenant.
+- One permission table authorizes every control-plane route; the gateway
+  checks a permission per route. Internal endpoints need a shared token.
+- Secrets never appear in responses, logs, audit records or cache keys;
+  provider and tool errors are normalized.
+
+Operations
+- `SUEZ_ENV` defaults to production and refuses unsafe settings; CORS
+  allowlist, trusted proxies, rate limiting, security headers, request ids,
+  structured logs, liveness and readiness probes.
+- Separate development and production compose files; only the edge is
+  public in production; migrations run through `scripts/migrate.sh`.
+- Go 1.26 and patched dependencies (govulncheck clean); images run as non-root.
+
+Policy
+- Tenant policy isolation, sandboxed validation/testing, database advisory
+  lock and reconciler for multi-replica publish/rollback/sync.
+
+Gateway
+- Streaming, safe retries, response validation, complete cache key with
+  policy version, fail-closed quotas.
+- Context-window thresholds per tenant/model with optional hard block and
+  checkpoint drafts.
+
+SUEZ Memory
+- Tenant-scoped sessions, evidence, cited summaries, structured
+  checkpoints with review, continuation within a token budget, explicit and
+  audited injection, export, deletion, retention, envelope encryption and
+  secret redaction. Context Guardian uses these APIs through the gateway.
+
+Documentation and tests
+- docs/production: threat model, architecture, configuration, runbooks,
+  go-live checklist, verified limitations and verification record.
+- Full-stack e2e suite (`scripts/e2e.sh`) and CI jobs for it, govulncheck,
+  npm audit and compose validation.
+
 ### Added
 - First publication of the SUEZ source tree to GitHub.
 - Root documentation: README rewrite with feature-status table,

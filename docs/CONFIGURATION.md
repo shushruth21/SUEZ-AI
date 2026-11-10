@@ -1,3 +1,5 @@
+> The complete, current variable reference for production is [production/CONFIGURATION.md](production/CONFIGURATION.md).
+
 # Configuration
 
 All values below are names and defaults only — never commit real values.

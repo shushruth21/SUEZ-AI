@@ -1,3 +1,5 @@
+> **Production deployments:** start with [production/README.md](production/README.md) — threat model, configuration, runbooks, go-live checklist and verified limitations. Sections below describe the development stack and Context Guardian.
+
 # Security and Privacy
 
 This document describes how SUEZ handles credentials and data **as
@@ -95,12 +97,12 @@ key travels in clear text.
 
 | Limitation | Risk | Mitigation |
 | --- | --- | --- |
-| **JWT signatures are not verified** — claims are decoded only | Anyone who can reach the API can impersonate any user with a crafted JWT | Never expose the stack to untrusted networks; implement verification before any shared deployment |
+| JWTs are verified against the IdP (`JWT_MODE=jwks`); the development stack uses a shared-secret mode (`dev-hs256`) that production refuses | Development tokens are signed with a known secret | Use `jwks` in production; see production/CONFIGURATION.md |
 | Demo API key and demo identities are seeded (`suez-demo-admin-key`, `*@example.com`) | Well-known admin credential | Local use only; create new keys and remove demo data for anything shared. The unauthenticated bootstrap endpoint only returns them when `SUEZ_EXPOSE_DEMO_CREDENTIALS=true` |
-| Every API key resolves to the `admin` role of its tenant | Key holders are tenant admins | Only admins can create or list keys, and only in their own tenant; treat keys as admin credentials |
+| API keys are scoped (read-only, gateway-inference, policy-admin, audit-reader, tenant-admin); keys created before migration 0007 keep `tenant-admin` | Old keys stay broad | Replace old keys with scoped ones and revoke them |
 | Default DB password `suez` | Trivial DB access if the port is reachable | Set `POSTGRES_PASSWORD` in `.env` |
-| Postgres, Redis, gateway, control plane and portal ports published on `0.0.0.0` | Services reachable from the local network | Bind to `127.0.0.1` or firewall. OPA and policy-llm (unauthenticated) bind to `127.0.0.1` by default and are not routed through the edge |
-| `Access-Control-Allow-Origin: *` on gateway and control plane | Any website can call the APIs from a browser that holds credentials | Restrict origins before sharing |
+| The development stack publishes ports on `127.0.0.1` (`BIND_ADDRESS`); the production example publishes only the edge | Local services reachable from the host | Keep `BIND_ADDRESS=127.0.0.1` |
+| CORS is an explicit allowlist (`CORS_ALLOWED_ORIGINS`); the development stack allows `*` | Any site can call the development APIs | Production refuses `*` |
 | Self-signed / locally trusted TLS on the edge; internal traffic is plain HTTP | Not suitable beyond a single machine | Use real certificates and TLS between services |
 | Chat messages are forwarded to external providers for provider-backed models; responses are cached in Redis for 60 s | Prompt content leaves the machine / persists briefly | Use the stub or local models for sensitive data |
 | Tool inputs and outputs are stored in `tool_executions` | Sensitive tool data persists in PostgreSQL | Avoid sensitive payloads; plan a retention policy |
