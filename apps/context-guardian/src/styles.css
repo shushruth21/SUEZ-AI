@@ -583,3 +583,19 @@ button:disabled {
 .recovery {
   margin-top: 8px;
 }
+
+/* Checkpoints stored in SUEZ (gateway mode) */
+.server-checkpoints { border-top: 1px solid var(--border, #2a2f3a); margin-top: 8px; padding-top: 8px; font-size: 12px; }
+.server-checkpoints-head, .server-checkpoint-list li { display: flex; align-items: center; gap: 6px; }
+.server-checkpoint-list { list-style: none; margin: 6px 0; padding: 0; }
+.server-checkpoint-list li { padding: 3px 0; }
+.server-status, .pill { border-radius: 8px; padding: 1px 6px; font-size: 11px; border: 1px solid currentColor; }
+.server-status.status-checkpoint, .server-status.status-notice, .pill-draft { color: #d9a441; }
+.server-status.status-warning, .server-status.status-limit, .pill-rejected { color: #e0605c; }
+.server-status.status-ok, .pill-approved { color: #5bb97f; }
+.pill-superseded { color: #8a909c; }
+.server-checkpoint-detail { border: 1px solid var(--border, #2a2f3a); border-radius: 6px; padding: 8px; margin-top: 6px; max-height: 220px; overflow: auto; }
+.server-checkpoint-detail dt { font-weight: 600; margin-top: 6px; }
+.server-checkpoint-detail dd { margin: 2px 0 0 0; white-space: pre-wrap; }
+.server-checkpoint-detail ul { margin: 0; padding-left: 16px; }
+.server-checkpoint-detail .notice { color: #d9a441; margin: 0 0 4px 0; }

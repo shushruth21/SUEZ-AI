@@ -19,7 +19,10 @@ import {
   ProjectMemory,
   UsageSnapshot
 } from "./types";
+import { effectiveThresholds } from "./usage/gatewayReading";
 import { GatewayUsageSource } from "./usage/gatewaySource";
+import { CarriedForward, createServerMemory } from "./usage/serverCheckpoints";
+import { ServerCheckpoints } from "./components/ServerCheckpoints";
 import { MockUsageSource } from "./usage/mockSource";
 import { UsageReading } from "./usage/source";
 
@@ -185,7 +188,8 @@ export default function App() {
     (next: UsageReading) => {
       setReading(next);
       if (next.guardPercent === null || next.display === null) return;
-      const result = evaluate(guardRef.current, next.guardPercent, settingsRef.current);
+      // Tenant thresholds from the gateway take precedence over local settings.
+      const result = evaluate(guardRef.current, next.guardPercent, effectiveThresholds(settingsRef.current, next.gateway));
       guardRef.current = result.state;
       if (result.events.length > 0) void handleGuardEvents(result.events, next.display);
     },
@@ -516,6 +520,28 @@ export default function App() {
     setView("editor");
   }
 
+  const serverMemory = useMemo(
+    () => createServerMemory((method, path, body) => api.gatewayMemoryRequest(settings.gatewayUrl, method, path, body)),
+    [settings.gatewayUrl]
+  );
+
+  // The server created the new session and recorded what it handed over; the
+  // app switches to that session and puts the same text on the clipboard so
+  // the user can see and paste exactly what is carried forward.
+  async function continueFromServer(nextSessionId: string, carried: CarriedForward) {
+    await persistSettings({ ...settingsRef.current, gatewaySessionId: nextSessionId });
+    try {
+      await api.checkTextForSecret(carried.contextText);
+      await desktop.copy(carried.contextText);
+      pushBanner({
+        kind: "info",
+        text: `New session started from the approved checkpoint (${carried.tokensUsed} of ${carried.tokenBudget} tokens, ${carried.evidence.length} evidence record(s), ${carried.omittedEvidenceIds.length} left out). The carried-forward text is on the clipboard.`
+      });
+    } catch (error) {
+      pushBanner({ kind: "info", text: `New session started, but the carried-forward text was not copied: ${error instanceof Error ? error.message : "copy failed"}` });
+    }
+  }
+
   const gatewayState = reading.gateway;
   const dataState = !isGateway
     ? null
@@ -604,6 +630,17 @@ export default function App() {
             }}
             onRefresh={() => void gatewayRef.current?.poll()}
             onCopySessionHeader={() => void copySessionHeader()}
+          />
+        ) : null}
+        {view === "monitor" && isGateway && hasApiKey ? (
+          <ServerCheckpoints
+            memory={serverMemory}
+            gatewaySessionId={settings.gatewaySessionId}
+            sessionLabel={session.label}
+            serverStatus={reading.gateway?.serverStatus ?? null}
+            localFinal={checkpoints.find((c) => c.sessionId === settings.gatewaySessionId && c.status === "final") ?? null}
+            newSessionId={newId}
+            onContinue={(next, carried) => void continueFromServer(next, carried)}
           />
         ) : null}
         {view === "editor" && active ? (

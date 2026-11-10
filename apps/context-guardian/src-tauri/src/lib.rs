@@ -171,6 +171,18 @@ async fn gateway_test_connection(
     Ok(gateway::fetch_identity(&gateway.client, gateway.secrets.as_ref(), &base_url).await)
 }
 
+/// Governed SUEZ Memory API (checkpoints, continuation) through the gateway.
+#[tauri::command]
+async fn gateway_memory_request(
+    gateway: State<'_, GatewayState>,
+    base_url: String,
+    method: String,
+    path: String,
+    body: Option<serde_json::Value>,
+) -> Result<GatewayResult<serde_json::Value>, String> {
+    Ok(gateway::memory_request(&gateway.client, gateway.secrets.as_ref(), &base_url, &method, &path, body).await)
+}
+
 #[tauri::command]
 fn smoke_mode() -> Option<String> {
     std::env::var_os(SMOKE_REPORT_ENV)?;
@@ -252,6 +264,7 @@ pub fn run() {
             gateway_clear_api_key,
             gateway_fetch_usage,
             gateway_test_connection,
+            gateway_memory_request,
             smoke_mode,
             smoke_signal,
             smoke_report

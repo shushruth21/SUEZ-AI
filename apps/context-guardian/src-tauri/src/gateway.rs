@@ -170,7 +170,24 @@ pub struct ContextUsage {
     pub measurement: Option<ContextUsageMeasurement>,
     pub context_window: Option<i64>,
     pub percent: Option<f64>,
+    /// Judged by the gateway against the tenant's thresholds (ok, notice,
+    /// checkpoint, warning, limit). Absent on older gateways.
+    #[serde(default)]
+    pub context_status: Option<String>,
+    #[serde(default)]
+    pub thresholds: Option<ContextThresholds>,
     pub retrieved_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextThresholds {
+    pub notice_percent: f64,
+    pub checkpoint_percent: f64,
+    pub warning_percent: f64,
+    pub block_percent: f64,
+    #[serde(default)]
+    pub hard_block: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -226,6 +243,20 @@ async fn get_json<T: for<'de> Deserialize<'de>>(
     path: &str,
     query: &[(&str, &str)],
 ) -> GatewayResult<T> {
+    send_json(client, secrets, base_url, reqwest::Method::GET, path, query, None).await
+}
+
+/// One authenticated JSON request to the gateway. Every failure is mapped to
+/// a `GatewayResult` variant and scrubbed of the API key.
+async fn send_json<T: for<'de> Deserialize<'de>>(
+    client: &reqwest::Client,
+    secrets: &dyn SecretStore,
+    base_url: &str,
+    method: reqwest::Method,
+    path: &str,
+    query: &[(&str, &str)],
+    body: Option<&serde_json::Value>,
+) -> GatewayResult<T> {
     let base = match normalize_base_url(base_url) {
         Ok(base) => base,
         Err(message) => return GatewayResult::NotConfigured { message },
@@ -244,9 +275,16 @@ async fn get_json<T: for<'de> Deserialize<'de>>(
         Ok(url) => url,
         Err(_) => return GatewayResult::NotConfigured { message: "gateway URL is not valid".into() },
     };
-    url.query_pairs_mut().extend_pairs(query);
+    // Touching the query of a URL that has none would leave a bare "?".
+    if !query.is_empty() {
+        url.query_pairs_mut().extend_pairs(query);
+    }
 
-    let response = match client.get(url).header("X-API-Key", &key).send().await {
+    let mut request = client.request(method, url).header("X-API-Key", &key);
+    if let Some(body) = body {
+        request = request.json(body);
+    }
+    let response = match request.send().await {
         Ok(response) => response,
         Err(error) => {
             let what = if error.is_timeout() {
@@ -300,6 +338,44 @@ pub async fn fetch_context_usage(
     session_id: &str,
 ) -> GatewayResult<ContextUsage> {
     get_json(client, secrets, base_url, "/v1/context/usage", &[("session", session_id)]).await
+}
+
+/// Calls the governed SUEZ Memory API through the gateway (`/v1/memory/...`).
+///
+/// The webview chooses the path, so it is confined here: only the memory
+/// prefix, only plain path characters, and only the three methods the
+/// checkpoint workflow needs. The API key is added in Rust and never returned.
+pub async fn memory_request(
+    client: &reqwest::Client,
+    secrets: &dyn SecretStore,
+    base_url: &str,
+    method: &str,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> GatewayResult<serde_json::Value> {
+    let method = match method {
+        "GET" => reqwest::Method::GET,
+        "POST" => reqwest::Method::POST,
+        "PATCH" => reqwest::Method::PATCH,
+        _ => {
+            return GatewayResult::NotConfigured { message: "unsupported method for the memory API".into() };
+        }
+    };
+    let allowed = path.starts_with("/v1/memory/")
+        && path.len() <= 512
+        && !path.contains("..")
+        && !path.contains("//")
+        && path.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.' | ':'));
+    if !allowed {
+        return GatewayResult::NotConfigured { message: "path is outside the memory API".into() };
+    }
+    if let Some(body) = &body {
+        // Refuse to send a payload that contains the stored key.
+        if let Err(message) = refuse_if_contains_secret(secrets, &body.to_string()) {
+            return GatewayResult::NotConfigured { message };
+        }
+    }
+    send_json(client, secrets, base_url, method, path, &[], body.as_ref()).await
 }
 
 pub async fn fetch_identity(
@@ -418,6 +494,63 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn memory_request_sends_key_and_body_to_the_memory_api_only() {
+        let (base, request) = serve_once(http("201 Created", r#"{"checkpoint":{"id":"c1"}}"#), Duration::ZERO);
+        let body = serde_json::json!({"content": {"objective": "ship"}});
+        let result = run(memory_request(
+            &build_client(REQUEST_TIMEOUT),
+            &store_with_key(),
+            &base,
+            "POST",
+            "/v1/memory/sessions/abc-123/checkpoints",
+            Some(body),
+        ));
+        let raw = request.recv().unwrap();
+        assert!(raw.starts_with("POST /v1/memory/sessions/abc-123/checkpoints HTTP/1.1"), "{raw}");
+        assert!(raw.to_lowercase().contains(&format!("x-api-key: {KEY}")), "{raw}");
+        // The one-shot test server reads the request head; the JSON body is
+        // announced there by its content type and length.
+        let head = raw.to_lowercase();
+        assert!(head.contains("content-type: application/json"), "{raw}");
+        assert!(head.contains("content-length: 32"), "{raw}");
+        assert!(raw.contains(r#""objective":"ship""#), "{raw}");
+        assert_no_key(&result);
+        match result {
+            GatewayResult::Ok { data } => assert_eq!(data["checkpoint"]["id"], "c1"),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn memory_request_refuses_other_paths_methods_and_key_bearing_payloads() {
+        let client = build_client(REQUEST_TIMEOUT);
+        let store = store_with_key();
+        // No server is listening: every refusal below must happen before any request.
+        let base = "http://127.0.0.1:1";
+        for path in [
+            "/v1/chat/completions",
+            "/v1/memory/../identity",
+            "/v1/memory//sessions",
+            "/v1/memory/sessions?x=1",
+            "/v1/memory/sessions#frag",
+            "/internal/auth/resolve",
+            "v1/memory/sessions",
+            "/v1/memory/a b",
+        ] {
+            let result = run(memory_request(&client, &store, base, "GET", path, None));
+            assert!(matches!(result, GatewayResult::NotConfigured { .. }), "{path}: {result:?}");
+        }
+        for method in ["DELETE", "PUT", "get", ""] {
+            let result = run(memory_request(&client, &store, base, method, "/v1/memory/sessions", None));
+            assert!(matches!(result, GatewayResult::NotConfigured { .. }), "{method}: {result:?}");
+        }
+        let leaking = serde_json::json!({"content": {"objective": format!("use {KEY}")}});
+        let result = run(memory_request(&client, &store, base, "POST", "/v1/memory/sessions/s/checkpoints", Some(leaking)));
+        assert!(matches!(result, GatewayResult::NotConfigured { .. }), "{result:?}");
+        assert_no_key(&result);
     }
 
     #[test]
