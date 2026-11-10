@@ -935,3 +935,52 @@ func TestJ_NoSecretsInStoredRecords(t *testing.T) {
 		t.Fatalf("audit log: %d", resp.status)
 	}
 }
+
+// The desktop app reaches SUEZ Memory through the gateway with the caller's
+// own credential; the gateway adds no privilege.
+func TestK_MemoryThroughGateway(t *testing.T) {
+	gw := func(method, path, auth string, body any) response { return call(method, gateway+path, auth, body) }
+	want(t, "chat to create a session", chat(inferenceKey, "stub-small", "desktop flow message", nil, "X-SUEZ-Session-Id", "e2e-desktop-1"), 200)
+	time.Sleep(400 * time.Millisecond)
+
+	index := gw("GET", "/v1/memory/sessions", inferenceKey, nil)
+	want(t, "session index through the gateway", index, 200)
+	sessionID := ""
+	for _, raw := range index.dig("sessions").([]any) {
+		if session := raw.(map[string]any); session["externalSessionId"] == "e2e-desktop-1" {
+			sessionID = session["id"].(string)
+		}
+	}
+	if sessionID == "" {
+		t.Fatalf("captured session not visible through the gateway: %s", index.raw)
+	}
+	// Upload a checkpoint the way the desktop app does, then review and continue.
+	draft := gw("POST", "/v1/memory/sessions/"+sessionID+"/checkpoints", inferenceKey, map[string]any{"content": map[string]any{
+		"objective": "Finish the desktop flow", "completedWork": []string{"Policy isolation (verified locally: e2e passed)"},
+		"nextActions": []string{"Write the runbook"}, "evidenceRefs": []string{},
+	}})
+	want(t, "upload draft", draft, 201)
+	checkpointID := draft.str("checkpoint", "id")
+	if draft.str("checkpoint", "status") != "draft" || draft.dig("checkpoint", "generated") != false {
+		t.Errorf("uploaded checkpoint: %s", draft.raw)
+	}
+	expect(t, "continue before approval", gw("POST", "/v1/memory/continuations", inferenceKey, map[string]any{"checkpointId": checkpointID, "externalSessionId": "e2e-desktop-2"}), 409)
+	want(t, "approve through the gateway", gw("POST", "/v1/memory/checkpoints/"+checkpointID+"/approve", inferenceKey, nil), 200)
+	continued := gw("POST", "/v1/memory/continuations", inferenceKey, map[string]any{"checkpointId": checkpointID, "externalSessionId": "e2e-desktop-2", "tokenBudget": 500})
+	want(t, "continue", continued, 201)
+	if !strings.Contains(continued.str("carriedForward", "contextText"), "Finish the desktop flow") {
+		t.Errorf("carry-forward text: %s", continued.raw)
+	}
+
+	// Same rules as the control plane: scope, tenant and method.
+	readOnly, _ := createKey(t, adminKey, "ro-memory", []string{"read-only"}, nil)
+	expect(t, "read-only key reading memory through the gateway", gw("GET", "/v1/memory/sessions", readOnly, nil), 403)
+	expect(t, "read-only key writing memory through the gateway", gw("POST", "/v1/memory/continuations", readOnly, map[string]any{}), 403)
+	expect(t, "no credentials", gw("GET", "/v1/memory/sessions", "", nil), 401)
+	expect(t, "tenant B reading tenant A's checkpoint through the gateway", gw("GET", "/v1/memory/checkpoints/"+checkpointID, tenantBKey, nil), 404)
+	if other := gw("GET", "/v1/memory/sessions", tenantBKey, nil); strings.Contains(other.raw, "e2e-desktop-1") {
+		t.Errorf("tenant B sees tenant A's sessions through the gateway")
+	}
+	expect(t, "inference key changing tenant settings through the gateway", gw("PUT", "/v1/memory/settings", inferenceKey, map[string]any{"captureEnabled": false}), 403)
+	expect(t, "internal endpoint through the memory route", gw("POST", "/v1/memory/../../internal/memory/capture", inferenceKey, map[string]any{}), 404)
+}

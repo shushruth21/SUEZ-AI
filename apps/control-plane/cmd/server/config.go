@@ -205,7 +205,7 @@ func (c runtimeConfig) withCORS(next http.Handler) http.Handler {
 				w.Header().Add("Vary", "Origin")
 			}
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key, X-SUEZ-Session-Id, X-Request-Id")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Expose-Headers", "X-Request-Id, X-SUEZ-Trace-Id, X-Suez-Cache, X-SUEZ-Context-Status")
 			w.Header().Set("Access-Control-Max-Age", "600")
 		}

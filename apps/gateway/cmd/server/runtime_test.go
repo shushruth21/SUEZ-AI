@@ -545,3 +545,53 @@ func TestStatsKeysArePerTenant(t *testing.T) {
 		t.Fatal("stats keys must differ per tenant")
 	}
 }
+
+func TestMemoryProxyForwardsCallerCredentialOnly(t *testing.T) {
+	var seenPath, seenKey, seenInternal, seenMethod string
+	controlPlane := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenPath, seenKey, seenInternal, seenMethod = r.URL.Path, r.Header.Get("X-API-Key"), r.Header.Get("X-SUEZ-Internal-Token"), r.Method
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		_, _ = io.WriteString(w, `{"sessions":[]}`)
+	}))
+	defer controlPlane.Close()
+	t.Setenv("CONTROL_PLANE_INTERNAL_URL", controlPlane.URL)
+	app := &gatewayApp{cfg: runtimeConfig{InternalToken: "internal-token-value"}}
+	call := func(method, target string, permissions ...string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, target, strings.NewReader(`{}`))
+		req.Header.Set("X-API-Key", "caller-key")
+		req.Header.Set("X-SUEZ-Internal-Token", "spoofed")
+		rec := httptest.NewRecorder()
+		identity := identityContext{TenantID: "t", Actor: "a", Permissions: permissions}
+		app.handleMemoryProxy(rec, req.WithContext(context.WithValue(req.Context(), identityContextKey, identity)))
+		return rec
+	}
+	rec := call(http.MethodGet, "/v1/memory/sessions/abc/checkpoints", "memory.read")
+	if rec.Code != http.StatusOK || seenPath != "/api/v1/memory/sessions/abc/checkpoints" || seenKey != "caller-key" {
+		t.Fatalf("proxy: %d path=%q key=%q", rec.Code, seenPath, seenKey)
+	}
+	if seenInternal != "" {
+		t.Fatalf("an internal token (%q) was forwarded on the public memory path", seenInternal)
+	}
+	if rec.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Error("upstream CORS header was passed through")
+	}
+	// Reads need memory.read, writes need memory.write, and the path cannot escape.
+	seenPath = ""
+	if rec := call(http.MethodGet, "/v1/memory/sessions"); rec.Code != http.StatusForbidden || seenPath != "" {
+		t.Errorf("no permission: %d (forwarded to %q)", rec.Code, seenPath)
+	}
+	if rec := call(http.MethodPost, "/v1/memory/continuations", "memory.read"); rec.Code != http.StatusForbidden || seenPath != "" {
+		t.Errorf("write with read permission: %d", rec.Code)
+	}
+	if rec := call(http.MethodPost, "/v1/memory/continuations", "memory.read", "memory.write"); rec.Code != http.StatusOK || seenMethod != http.MethodPost {
+		t.Errorf("write: %d %s", rec.Code, seenMethod)
+	}
+	seenPath = ""
+	if rec := call(http.MethodGet, "/v1/memory/../../internal/auth/resolve", "memory.read"); rec.Code != http.StatusNotFound || seenPath != "" {
+		t.Errorf("path traversal: %d (forwarded to %q)", rec.Code, seenPath)
+	}
+	controlPlane.Close()
+	if rec := call(http.MethodGet, "/v1/memory/sessions", "memory.read"); rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("control plane down: %d, want 503", rec.Code)
+	}
+}

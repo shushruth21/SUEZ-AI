@@ -220,6 +220,11 @@ func main() {
 }
 
 func (a *controlPlaneApp) handleRoot(w http.ResponseWriter, r *http.Request) {
+	// The mux sends every unmatched path here; only "/" itself is the banner.
+	if r.URL.Path != "/" {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"service": "control-plane",
 		"status":  "running",

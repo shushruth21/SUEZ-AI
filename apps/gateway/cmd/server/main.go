@@ -125,6 +125,7 @@ func main() {
 	for _, route := range []string{"/v1/identity", "/v1/chat/completions", "/v1/tools/execute", "/v1/observability", "/v1/context/usage"} {
 		mux.Handle(route, protected)
 	}
+	mux.Handle("/v1/memory/", app.withIdentityResolver(http.HandlerFunc(app.handleMemoryProxy)))
 
 	server := newHTTPServer(":"+port, cfg.withRequestContext(cfg.withCORS(cfg.withRateLimit(withBodyLimit(mux)))))
 
@@ -133,10 +134,14 @@ func main() {
 }
 
 func (a *gatewayApp) handleRoot(w http.ResponseWriter, r *http.Request) {
+	// The mux sends every unmatched path here; only "/" itself is the banner.
+	if r.URL.Path != "/" {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"service": "gateway",
 		"status":  "running",
-		"phase":   "phase-8",
 		"routes": []string{
 			"/healthz",
 			"/v1/identity",
@@ -144,6 +149,7 @@ func (a *gatewayApp) handleRoot(w http.ResponseWriter, r *http.Request) {
 			"/v1/tools/execute",
 			"/v1/observability",
 			"/v1/context/usage",
+			"/v1/memory/*",
 		},
 	})
 }
