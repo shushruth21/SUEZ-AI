@@ -4,14 +4,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"math"
 	"net/http"
 	"strings"
@@ -57,19 +56,6 @@ type toolRuntime struct {
 	HTTPHeaders   json.RawMessage `json:"httpHeaders"`
 	RiskTier      string          `json:"riskTier"`
 	Enabled       bool            `json:"enabled"`
-}
-
-type chatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
-type chatCompletionRequest struct {
-	Model       string        `json:"model"`
-	Messages    []chatMessage `json:"messages"`
-	Temperature *float64      `json:"temperature,omitempty"`
-	MaxTokens   *int          `json:"max_tokens,omitempty"`
-	Stream      bool          `json:"stream,omitempty"`
 }
 
 type chatChoice struct {
@@ -140,141 +126,6 @@ func (a *gatewayApp) handleObservability(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, out)
 }
 
-func (a *gatewayApp) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
-	identity := mustIdentity(r.Context())
-	traceID := newTraceID()
-
-	// Optional: clients that send no session header behave exactly as before.
-	sessionID, err := sessionIDFromRequest(r)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
-
-	var req chatCompletionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
-		return
-	}
-	if err := validateChatCompletionRequest(req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
-	if req.Stream {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "streaming is not supported in the local runtime"})
-		return
-	}
-	_ = a.redis.Incr(r.Context(), statsKey(identity.TenantID, "chat_requests")).Err()
-
-	model, err := a.lookupModel(r.Context(), identity.TenantID, strings.TrimSpace(req.Model))
-	if err != nil {
-		a.auditGatewayEvent(r.Context(), identity, "model.invoke", "model", req.Model, "error", traceID, map[string]any{"error": err.Error()})
-		writeGatewayLookupError(w, err, http.StatusNotFound, "model not found")
-		return
-	}
-	if !model.Enabled {
-		a.auditGatewayEvent(r.Context(), identity, "model.invoke", "model", model.ExternalName, "deny", traceID, map[string]any{"reason": "model disabled"})
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "model is disabled"})
-		return
-	}
-	if err := a.ensureGrant(r.Context(), identity, "model", model.ExternalName); err != nil {
-		a.auditGatewayEvent(r.Context(), identity, "model.invoke", "model", model.ExternalName, "deny", traceID, map[string]any{"reason": err.Error()})
-		writeGatewayLookupError(w, err, http.StatusForbidden, "no active model grant")
-		return
-	}
-
-	estimatedTokens := estimateChatTokens(req.Messages, optionalInt(req.MaxTokens))
-	policy, err := a.evaluateOPA(r.Context(), "chat.completions", identity, map[string]any{
-		"type":      "model",
-		"name":      model.ExternalName,
-		"provider":  model.Provider,
-		"enabled":   model.Enabled,
-		"maxRpm":    model.MaxRPM,
-		"maxTpm":    model.MaxTPM,
-		"riskTier":  "standard",
-		"upstream":  model.UpstreamModel,
-		"traceId":   traceID,
-		"estimated": estimatedTokens,
-	}, req)
-	if err != nil {
-		a.auditGatewayEvent(r.Context(), identity, "model.invoke", "model", model.ExternalName, "error", traceID, map[string]any{"error": err.Error()})
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "policy evaluation failed"})
-		return
-	}
-	if !policy.Allow {
-		a.auditGatewayEvent(r.Context(), identity, "model.invoke", "model", model.ExternalName, "deny", traceID, map[string]any{"policy": policy})
-		writeJSON(w, http.StatusForbidden, map[string]any{"error": "policy denied model invocation", "policy": policy})
-		return
-	}
-
-	if err := a.enforceQuota(r.Context(), identity, model.ExternalName, model.MaxRPM, model.MaxTPM, estimatedTokens); err != nil {
-		a.auditGatewayEvent(r.Context(), identity, "model.invoke", "model", model.ExternalName, "deny", traceID, map[string]any{"reason": err.Error(), "estimatedTokens": estimatedTokens})
-		if errors.Is(err, errQuotaBackendUnavailable) {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "quota service unavailable"})
-			return
-		}
-		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": err.Error()})
-		return
-	}
-
-	cacheKey := chatCacheKey(identity.TenantID, model.ExternalName, req)
-	if cached, err := a.getCachedChatResponse(r.Context(), cacheKey); err == nil && cached != nil {
-		_ = a.redis.Incr(r.Context(), statsKey(identity.TenantID, "cache_hits")).Err()
-		// Cache hits are still model invocations and must appear in the audit log.
-		hitMetadata := map[string]any{
-			"provider":         model.Provider,
-			"cache":            "hit",
-			"estimatedTokens":  estimatedTokens,
-			"actualPrompt":     cached.Usage.PromptTokens,
-			"actualCompletion": cached.Usage.CompletionTokens,
-			"actualTotal":      cached.Usage.TotalTokens,
-		}
-		if sessionID != "" {
-			hitMetadata["sessionId"] = sessionID
-		}
-		a.auditGatewayEvent(r.Context(), identity, "model.invoke", "model", model.ExternalName, "allow", traceID, hitMetadata)
-		// Record hits too, otherwise the session's previous (smaller) measurement
-		// would be reported as current. The cache key covers the full message list,
-		// so the cached counts describe exactly this conversation.
-		a.recordContextUsage(r.Context(), measurementFor(identity, model, sessionID, traceID, cacheStatusHit, cached.Usage, time.Now()))
-		w.Header().Set("X-SUEZ-Trace-Id", traceID)
-		w.Header().Set("X-Suez-Cache", "HIT")
-		writeJSON(w, http.StatusOK, cached)
-		return
-	}
-
-	resp, err := a.executeChatProvider(r.Context(), model, req)
-	if err != nil {
-		// The full error (which may include the provider's response body) goes to
-		// the audit log and server log; the caller gets a short message.
-		log.Printf("chat provider failed for trace %s: %v", traceID, err)
-		a.auditGatewayEvent(r.Context(), identity, "model.invoke", "model", model.ExternalName, "error", traceID, map[string]any{"error": err.Error()})
-		w.Header().Set("X-SUEZ-Trace-Id", traceID)
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": publicProviderError(err), "traceId": traceID})
-		return
-	}
-	if resp.Usage.TotalTokens > estimatedTokens {
-		a.reconcileTokenUsage(r.Context(), identity, model.ExternalName, resp.Usage.TotalTokens-estimatedTokens)
-	}
-	auditMetadata := map[string]any{
-		"provider":         model.Provider,
-		"cache":            "miss",
-		"estimatedTokens":  estimatedTokens,
-		"actualPrompt":     resp.Usage.PromptTokens,
-		"actualCompletion": resp.Usage.CompletionTokens,
-		"actualTotal":      resp.Usage.TotalTokens,
-	}
-	if sessionID != "" {
-		auditMetadata["sessionId"] = sessionID
-	}
-	a.auditGatewayEvent(r.Context(), identity, "model.invoke", "model", model.ExternalName, "allow", traceID, auditMetadata)
-	a.recordContextUsage(r.Context(), measurementFor(identity, model, sessionID, traceID, cacheStatusMiss, resp.Usage, time.Now()))
-	_ = a.setCachedChatResponse(r.Context(), cacheKey, resp)
-	w.Header().Set("X-SUEZ-Trace-Id", traceID)
-	w.Header().Set("X-Suez-Cache", "MISS")
-	writeJSON(w, http.StatusOK, resp)
-}
-
 func (a *gatewayApp) handleToolExecute(w http.ResponseWriter, r *http.Request) {
 	identity := mustIdentity(r.Context())
 	traceID := newTraceID()
@@ -292,9 +143,14 @@ func (a *gatewayApp) handleToolExecute(w http.ResponseWriter, r *http.Request) {
 		req.Input = map[string]any{}
 	}
 
+	if !allowedByList(identity.AllowedTools, strings.TrimSpace(req.Name)) {
+		a.auditGatewayEvent(r.Context(), identity, "tool.execute", "tool", strings.TrimSpace(req.Name), "deny", traceID, map[string]any{"reason": "tool is outside the api key's allowed tools"})
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "this api key is not allowed to use this tool"})
+		return
+	}
 	tool, err := a.lookupTool(r.Context(), identity.TenantID, strings.TrimSpace(req.Name))
 	if err != nil {
-		a.auditGatewayEvent(r.Context(), identity, "tool.execute", "tool", req.Name, "error", traceID, map[string]any{"error": err.Error()})
+		a.auditGatewayEvent(r.Context(), identity, "tool.execute", "tool", strings.TrimSpace(req.Name), "error", traceID, map[string]any{"reason": "tool lookup failed"})
 		writeGatewayLookupError(w, err, http.StatusNotFound, "tool not found")
 		return
 	}
@@ -304,7 +160,7 @@ func (a *gatewayApp) handleToolExecute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.ensureGrant(r.Context(), identity, "tool", tool.Name); err != nil {
-		a.auditGatewayEvent(r.Context(), identity, "tool.execute", "tool", tool.Name, "deny", traceID, map[string]any{"reason": err.Error()})
+		a.auditGatewayEvent(r.Context(), identity, "tool.execute", "tool", tool.Name, "deny", traceID, map[string]any{"reason": "no active grant"})
 		writeGatewayLookupError(w, err, http.StatusForbidden, "no active tool grant")
 		return
 	}
@@ -323,8 +179,9 @@ func (a *gatewayApp) handleToolExecute(w http.ResponseWriter, r *http.Request) {
 		"traceId":  traceID,
 	}, req)
 	if err != nil {
-		a.auditGatewayEvent(r.Context(), identity, "tool.execute", "tool", tool.Name, "error", traceID, map[string]any{"error": err.Error()})
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "policy evaluation failed"})
+		logWarn("policy evaluation failed", traceID, err)
+		a.auditGatewayEvent(r.Context(), identity, "tool.execute", "tool", tool.Name, "error", traceID, map[string]any{"reason": "policy evaluation failed"})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "policy service unavailable", "traceId": traceID})
 		return
 	}
 	if !policy.Allow {
@@ -335,11 +192,12 @@ func (a *gatewayApp) handleToolExecute(w http.ResponseWriter, r *http.Request) {
 
 	output, err := a.executeTool(r.Context(), tool, req.Input)
 	if err != nil {
-		a.auditGatewayEvent(r.Context(), identity, "tool.execute", "tool", tool.Name, "error", traceID, map[string]any{"error": err.Error()})
-		_ = a.insertToolExecution(r.Context(), identity, tool, traceID, "error", req.Input, map[string]any{"error": err.Error()})
-		log.Printf("tool %s failed for trace %s: %v", tool.Name, traceID, err)
-		w.Header().Set("X-SUEZ-Trace-Id", traceID)
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": publicProviderError(err), "traceId": traceID})
+		// The tool endpoint's own error text can echo inputs or credentials, so
+		// only a normalized code is stored and returned.
+		code, upstreamStatus := providerErrorCode(err)
+		a.auditGatewayEvent(r.Context(), identity, "tool.execute", "tool", tool.Name, "error", traceID, map[string]any{"code": code, "upstreamStatus": upstreamStatus})
+		_ = a.insertToolExecution(r.Context(), identity, tool, traceID, "error", req.Input, map[string]any{"error": code})
+		writeProviderError(w, err, traceID)
 		return
 	}
 	_ = a.insertToolExecution(r.Context(), identity, tool, traceID, "allow", req.Input, output)
@@ -504,20 +362,7 @@ func (a *gatewayApp) reconcileTokenUsage(ctx context.Context, identity identityC
 		return nil
 	})
 	if err != nil {
-		log.Printf("quota reconciliation failed: %v", err)
-	}
-}
-
-func (a *gatewayApp) executeChatProvider(ctx context.Context, model modelRuntime, req chatCompletionRequest) (chatCompletionResponse, error) {
-	switch strings.ToLower(model.Provider) {
-	case "stub":
-		return executeStubChat(model, req), nil
-	case "openai-compatible":
-		return a.executeOpenAICompatibleChat(ctx, model, req)
-	case "groq":
-		return a.executeGroqChat(ctx, model, req)
-	default:
-		return chatCompletionResponse{}, fmt.Errorf("unsupported model provider %q", model.Provider)
+		slog.Warn("quota reconciliation failed", "error", err.Error())
 	}
 }
 
@@ -557,88 +402,6 @@ func executeStubChat(model modelRuntime, req chatCompletionRequest) chatCompleti
 	}
 }
 
-func (a *gatewayApp) executeOpenAICompatibleChat(ctx context.Context, model modelRuntime, req chatCompletionRequest) (chatCompletionResponse, error) {
-	baseURL := strings.TrimRight(firstNonEmpty(model.UpstreamBaseURL, env("OPENAI_COMPAT_BASE_URL", "")), "/")
-	if baseURL == "" {
-		return chatCompletionResponse{}, errors.New("openai-compatible base URL is not configured")
-	}
-	apiKey := strings.TrimSpace(env("OPENAI_COMPAT_API_KEY", ""))
-	if apiKey == "" {
-		return chatCompletionResponse{}, errors.New("openai-compatible API key is not configured")
-	}
-
-	upstreamModel := firstNonEmpty(model.UpstreamModel, model.ModelName, req.Model)
-	body, err := json.Marshal(upstreamChatBody(upstreamModel, req))
-	if err != nil {
-		return chatCompletionResponse{}, err
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return chatCompletionResponse{}, err
-	}
-	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := a.httpClient.Do(httpReq)
-	if err != nil {
-		return chatCompletionResponse{}, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		payload, _ := io.ReadAll(io.LimitReader(resp.Body, upstreamErrorBodyLimit))
-		return chatCompletionResponse{}, &upstreamError{label: "upstream", status: resp.Status, body: strings.TrimSpace(string(payload))}
-	}
-
-	upstream, err := decodeUpstreamChatResponse(resp.Body)
-	if err != nil {
-		return chatCompletionResponse{}, err
-	}
-	upstream.Model = model.ExternalName
-	return upstream, nil
-}
-
-func (a *gatewayApp) executeGroqChat(ctx context.Context, model modelRuntime, req chatCompletionRequest) (chatCompletionResponse, error) {
-	baseURL := strings.TrimRight(firstNonEmpty(model.UpstreamBaseURL, env("GROQ_BASE_URL", "https://api.groq.com/openai/v1")), "/")
-	if baseURL == "" {
-		return chatCompletionResponse{}, errors.New("Groq base URL is not configured")
-	}
-	apiKey := strings.TrimSpace(env("GROQ_API_KEY", ""))
-	if apiKey == "" {
-		return chatCompletionResponse{}, errors.New("Groq API key is not configured (set GROQ_API_KEY or GROQ_API_KEY_FILE)")
-	}
-
-	upstreamModel := firstNonEmpty(model.UpstreamModel, model.ModelName, req.Model)
-	body, err := json.Marshal(upstreamChatBody(upstreamModel, req))
-	if err != nil {
-		return chatCompletionResponse{}, err
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return chatCompletionResponse{}, err
-	}
-	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := a.httpClient.Do(httpReq)
-	if err != nil {
-		return chatCompletionResponse{}, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		payload, _ := io.ReadAll(io.LimitReader(resp.Body, upstreamErrorBodyLimit))
-		return chatCompletionResponse{}, &upstreamError{label: "groq upstream", status: resp.Status, body: strings.TrimSpace(string(payload))}
-	}
-
-	upstream, err := decodeUpstreamChatResponse(resp.Body)
-	if err != nil {
-		return chatCompletionResponse{}, err
-	}
-	upstream.Model = model.ExternalName
-	return upstream, nil
-}
-
 func (a *gatewayApp) executeTool(ctx context.Context, tool toolRuntime, input map[string]any) (any, error) {
 	switch strings.ToLower(tool.ExecutionMode) {
 	case "stub":
@@ -646,7 +409,7 @@ func (a *gatewayApp) executeTool(ctx context.Context, tool toolRuntime, input ma
 	case "http":
 		return a.executeHTTPTool(ctx, tool, input)
 	default:
-		return nil, fmt.Errorf("unsupported tool execution mode %q", tool.ExecutionMode)
+		return nil, &providerError{Code: "tool_mode_unsupported", Message: "the tool's execution mode is not supported", Status: http.StatusBadGateway}
 	}
 }
 
@@ -672,12 +435,16 @@ func executeStubTool(tool toolRuntime, input map[string]any) map[string]any {
 }
 
 func (a *gatewayApp) executeHTTPTool(ctx context.Context, tool toolRuntime, input map[string]any) (any, error) {
+	const label = "tool endpoint"
+	invalid := func(code, message string) error {
+		return &providerError{Code: code, Message: message, Status: http.StatusBadGateway}
+	}
 	if strings.TrimSpace(tool.TargetURL) == "" {
-		return nil, errors.New("http tool target URL is not configured")
+		return nil, &providerError{Code: "tool_not_configured", Message: "the tool has no target URL", Status: http.StatusServiceUnavailable}
 	}
 	body, err := json.Marshal(input)
 	if err != nil {
-		return nil, err
+		return nil, invalid("internal_error", "tool input could not be encoded")
 	}
 
 	timeout := time.Duration(tool.TimeoutMS) * time.Millisecond
@@ -689,7 +456,7 @@ func (a *gatewayApp) executeHTTPTool(ctx context.Context, tool toolRuntime, inpu
 
 	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, tool.TargetURL, bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return nil, &providerError{Code: "tool_not_configured", Message: "the tool target URL is not valid", Status: http.StatusServiceUnavailable}
 	}
 	req.Header.Set("Content-Type", "application/json")
 	var headers map[string]string
@@ -700,31 +467,39 @@ func (a *gatewayApp) executeHTTPTool(ctx context.Context, tool toolRuntime, inpu
 		req.Header.Set(key, value)
 	}
 
-	resp, err := a.httpClient.Do(req)
+	resp, err := a.toolClient().Do(req)
 	if err != nil {
-		return nil, err
+		return nil, normalizeTransportError(label, err)
 	}
 	defer resp.Body.Close()
 	payload, err := io.ReadAll(io.LimitReader(resp.Body, toolResponseBodyLimit+1))
 	if err != nil {
-		return nil, err
+		return nil, normalizeTransportError(label, err)
 	}
 	if int64(len(payload)) > toolResponseBodyLimit {
-		return nil, errors.New("tool endpoint response is too large")
+		return nil, invalid("tool_response_too_large", "the tool response is too large")
 	}
 	if resp.StatusCode >= 400 {
-		return nil, &upstreamError{label: "tool endpoint", status: resp.Status, body: truncate(strings.TrimSpace(string(payload)), int(upstreamErrorBodyLimit))}
+		return nil, normalizeUpstreamStatus(label, resp, payload)
 	}
 	var decoded any
 	if err := json.Unmarshal(payload, &decoded); err != nil {
-		return nil, err
+		return nil, invalid("tool_invalid_response", "the tool response is not valid JSON")
 	}
 	if len(tool.OutputSchema) > 0 && string(tool.OutputSchema) != "{}" {
 		if err := validateJSONSchema(tool.OutputSchema, decoded); err != nil {
-			return nil, fmt.Errorf("tool output validation failed: %w", err)
+			return nil, invalid("tool_output_invalid", "the tool response does not match its output schema")
 		}
 	}
 	return decoded, nil
+}
+
+// toolClient never follows redirects: a tool endpoint must not be able to
+// bounce the request (with its configured secret headers) to another host.
+func (a *gatewayApp) toolClient() *http.Client {
+	client := *a.httpClient
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &client
 }
 
 func (a *gatewayApp) insertToolExecution(ctx context.Context, identity identityContext, tool toolRuntime, traceID, status string, inputPayload, outputPayload any) error {
@@ -748,13 +523,20 @@ func (a *gatewayApp) auditGatewayEvent(ctx context.Context, identity identityCon
 		metadata = map[string]any{}
 	}
 	payload, err := json.Marshal(metadata)
-	if err != nil {
+	if err != nil || a.db == nil {
 		return
 	}
-	_, _ = a.db.ExecContext(ctx, `
+	// The audit row must be written even when the caller has gone away (a
+	// cancelled stream is still an event), so the request's cancellation is
+	// not inherited. A failed write is logged with the trace id.
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if _, err := a.db.ExecContext(writeCtx, `
 		insert into audit_log (tenant_id, actor, action, resource_type, resource_name, decision, trace_id, metadata)
 		values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
-	`, identity.TenantID, identity.Actor, action, resourceType, resourceName, decision, traceID, string(payload))
+	`, identity.TenantID, identity.Actor, action, resourceType, resourceName, decision, traceID, string(payload)); err != nil {
+		slog.Error("audit write failed", "traceId", traceID, "action", action, "error", err.Error())
+	}
 }
 
 func validateJSONSchema(schema json.RawMessage, document any) error {
@@ -775,64 +557,6 @@ func validateJSONSchema(schema json.RawMessage, document any) error {
 	return errors.New(strings.Join(messages, "; "))
 }
 
-func validateChatCompletionRequest(req chatCompletionRequest) error {
-	if strings.TrimSpace(req.Model) == "" || len(req.Messages) == 0 {
-		return errors.New("model and messages are required")
-	}
-	if req.Temperature != nil && (*req.Temperature < 0 || *req.Temperature > 2) {
-		return errors.New("temperature must be between 0 and 2")
-	}
-	if req.MaxTokens != nil && *req.MaxTokens < 1 {
-		return errors.New("max_tokens must be at least 1")
-	}
-	for _, message := range req.Messages {
-		switch strings.ToLower(strings.TrimSpace(message.Role)) {
-		case "system", "user", "assistant", "tool":
-		default:
-			return errors.New("message role must be system, user, assistant, or tool")
-		}
-	}
-	return nil
-}
-
-func optionalInt(value *int) int {
-	if value == nil {
-		return 0
-	}
-	return *value
-}
-
-func upstreamChatBody(model string, req chatCompletionRequest) map[string]any {
-	body := map[string]any{"model": model, "messages": req.Messages}
-	if req.Temperature != nil {
-		body["temperature"] = *req.Temperature
-	}
-	if req.MaxTokens != nil {
-		body["max_tokens"] = *req.MaxTokens
-	}
-	return body
-}
-
-const upstreamChatResponseBodyLimit int64 = 16 << 20
-
-func decodeUpstreamChatResponse(body io.Reader) (chatCompletionResponse, error) {
-	payload, err := io.ReadAll(io.LimitReader(body, upstreamChatResponseBodyLimit+1))
-	if err != nil {
-		return chatCompletionResponse{}, err
-	}
-	if int64(len(payload)) > upstreamChatResponseBodyLimit {
-		return chatCompletionResponse{}, errors.New("upstream response is too large")
-	}
-	var upstream chatCompletionResponse
-	if err := json.Unmarshal(payload, &upstream); err != nil {
-		return chatCompletionResponse{}, err
-	}
-	if len(upstream.Choices) == 0 {
-		return chatCompletionResponse{}, errors.New("upstream response has no choices")
-	}
-	return upstream, nil
-}
-
 func writeGatewayLookupError(w http.ResponseWriter, err error, expectedStatus int, publicMessage string) {
 	if expectedStatus == http.StatusNotFound && (errors.Is(err, errModelNotFound) || errors.Is(err, errToolNotFound)) {
 		writeJSON(w, expectedStatus, map[string]string{"error": publicMessage})
@@ -842,20 +566,8 @@ func writeGatewayLookupError(w http.ResponseWriter, err error, expectedStatus in
 		writeJSON(w, expectedStatus, map[string]string{"error": publicMessage})
 		return
 	}
-	log.Printf("gateway database lookup failed: %v", err)
+	slog.Error("gateway database lookup failed", "error", err.Error())
 	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
-}
-
-func estimateChatTokens(messages []chatMessage, requestedMax int) int {
-	total := 0
-	for _, message := range messages {
-		total += estimateTokenString(message.Role)
-		total += estimateTokenString(message.Content)
-	}
-	if requestedMax > 0 {
-		total += requestedMax
-	}
-	return total
 }
 
 func estimateTokenString(text string) int {
@@ -883,20 +595,6 @@ func newTraceID() string {
 	return hex.EncodeToString(buf)
 }
 
-// chatCacheKey covers every request field that changes the response, not just
-// the messages: the same conversation with a different temperature or
-// max_tokens must not be answered from the other request's cache entry.
-func chatCacheKey(tenantID, model string, req chatCompletionRequest) string {
-	keyed, _ := json.Marshal(struct {
-		Model       string        `json:"model"`
-		Messages    []chatMessage `json:"messages"`
-		Temperature *float64      `json:"temperature"`
-		MaxTokens   *int          `json:"max_tokens"`
-	}{model, req.Messages, req.Temperature, req.MaxTokens})
-	sum := sha256.Sum256(keyed)
-	return chatCacheTenantPrefix(tenantID) + hex.EncodeToString(sum[:])
-}
-
 // chatCacheTenantPrefix puts the tenant in clear in the key so per-tenant
 // counts can be taken with a SCAN pattern.
 func chatCacheTenantPrefix(tenantID string) string {
@@ -908,38 +606,8 @@ func statsKey(tenantID, name string) string {
 }
 
 const (
-	upstreamErrorBodyLimit int64 = 2048
-	toolResponseBodyLimit  int64 = 4 << 20
+	toolResponseBodyLimit int64 = 4 << 20
 )
-
-// upstreamError keeps the provider's response body for logs and the audit
-// trail without sending it to the caller.
-type upstreamError struct {
-	label  string
-	status string
-	body   string
-}
-
-func (e *upstreamError) Error() string {
-	return fmt.Sprintf("%s returned %s: %s", e.label, e.status, e.body)
-}
-
-func publicProviderError(err error) string {
-	var upstream *upstreamError
-	if errors.As(err, &upstream) {
-		return upstream.label + " returned " + upstream.status
-	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		return "upstream request timed out"
-	}
-	// Configuration errors ("API key is not configured") are the gateway's own
-	// messages and safe to show; transport errors are summarised.
-	var netErr interface{ Timeout() bool }
-	if errors.As(err, &netErr) {
-		return "upstream request failed"
-	}
-	return err.Error()
-}
 
 func truncate(value string, max int) string {
 	if len(value) <= max {
