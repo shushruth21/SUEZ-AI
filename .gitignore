@@ -98,3 +98,4 @@ service-account*.json
 *.swo
 *~
 Thumbs.db
+!.env.production.example

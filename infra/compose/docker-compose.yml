@@ -1,3 +1,8 @@
+# DEVELOPMENT stack. It turns on demo credentials, a shared-secret JWT mode
+# and permissive CORS, and loads demo seed data. Do not deploy it. The
+# production example is docker-compose.prod.yml.
+#
+# Published ports bind to 127.0.0.1 unless BIND_ADDRESS is set.
 services:
   postgres:
     image: postgres:16-alpine
@@ -6,20 +11,9 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-suez}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-suez}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${BIND_ADDRESS:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      - ../db/migrations/0001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
-      - ../db/migrations/0002_phase2_access_workflow.sql:/docker-entrypoint-initdb.d/002_phase2_access_workflow.sql:ro
-      - ../db/migrations/0003_phase3_runtime_governance.sql:/docker-entrypoint-initdb.d/003_phase3_runtime_governance.sql:ro
-      - ../db/migrations/0004_phase5_policy_lifecycle.sql:/docker-entrypoint-initdb.d/004_phase5_policy_lifecycle.sql:ro
-      - ../db/migrations/0005_phase6_policy_tests.sql:/docker-entrypoint-initdb.d/005_phase6_policy_tests.sql:ro
-      - ../db/seeds/0001_seed.sql:/docker-entrypoint-initdb.d/006_seed.sql:ro
-      - ../db/seeds/0002_phase2_access_workflow.sql:/docker-entrypoint-initdb.d/007_phase2_access_workflow.sql:ro
-      - ../db/seeds/0003_phase3_runtime_governance.sql:/docker-entrypoint-initdb.d/008_phase3_runtime_governance.sql:ro
-      - ../db/seeds/0004_phase5_policy_lifecycle.sql:/docker-entrypoint-initdb.d/009_phase5_seed.sql:ro
-      - ../db/seeds/0005_phase6_policy_tests.sql:/docker-entrypoint-initdb.d/010_phase6_seed.sql:ro
-      - ../db/migrations/0006_context_guardian.sql:/docker-entrypoint-initdb.d/011_context_guardian.sql:ro
     healthcheck:
       test:
         [
@@ -32,10 +26,26 @@ services:
     networks:
       - suez-net
 
+  # Applies migrations, then the demo seeds (development only).
+  migrate:
+    image: postgres:16-alpine
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-suez}:${POSTGRES_PASSWORD:-suez}@postgres:5432/${POSTGRES_DB:-suez}?sslmode=disable
+    entrypoint: ["/bin/sh", "/scripts/migrate.sh", "/db/migrations", "/db/seeds"]
+    volumes:
+      - ../../scripts/migrate.sh:/scripts/migrate.sh:ro
+      - ../db/migrations:/db/migrations:ro
+      - ../db/seeds:/db/seeds:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - suez-net
+
   redis:
     image: redis:7-alpine
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      - "${BIND_ADDRESS:-127.0.0.1}:${REDIS_PORT:-6379}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -122,10 +132,20 @@ services:
       dockerfile: Dockerfile
     environment:
       PORT: 8081
+      SUEZ_ENV: development
+      SUEZ_INTERNAL_TOKEN: ${SUEZ_INTERNAL_TOKEN:-suez-development-only-internal-token}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-*}
+      SUEZ_EXPOSE_DEMO_CREDENTIALS: ${SUEZ_EXPOSE_DEMO_CREDENTIALS:-true}
+      JWT_MODE: ${JWT_MODE:-dev-hs256}
+      JWT_DEV_SECRET: ${JWT_DEV_SECRET:-suez-development-only-jwt-signing-secret}
+      JWT_ISSUER: ${JWT_ISSUER:-}
+      JWT_AUDIENCE: ${JWT_AUDIENCE:-}
+      JWT_JWKS_URL: ${JWT_JWKS_URL:-}
+      SUEZ_DATA_KEY: ${SUEZ_DATA_KEY:-}
       DATABASE_URL: postgres://${POSTGRES_USER:-suez}:${POSTGRES_PASSWORD:-suez}@postgres:5432/${POSTGRES_DB:-suez}?sslmode=disable
       POSTGRES_ADDR: postgres:5432
       REDIS_ADDR: redis:6379
-      OPA_HEALTH_URL: http://opa:8181/v1/data/suez/authz/allow
+      OPA_HEALTH_URL: http://opa:8181/health
       POLICY_LLM_URL: http://policy-llm:11434/api/tags
       GATEWAY_BASE_URL: http://gateway:8080
       CONTROL_PLANE_BASE_URL: http://control-plane:8081
@@ -138,6 +158,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       opa:
@@ -147,9 +169,9 @@ services:
       policy-llm-init:
         condition: service_completed_successfully
     ports:
-      - "${CONTROL_PLANE_PORT:-8081}:8081"
+      - "${BIND_ADDRESS:-127.0.0.1}:${CONTROL_PLANE_PORT:-8081}:8081"
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8081/ >/dev/null || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8081/healthz >/dev/null || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -162,10 +184,14 @@ services:
       dockerfile: Dockerfile
     environment:
       PORT: 8080
+      SUEZ_ENV: development
+      SUEZ_INTERNAL_TOKEN: ${SUEZ_INTERNAL_TOKEN:-suez-development-only-internal-token}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-*}
+      CONTROL_PLANE_INTERNAL_URL: http://control-plane:8081
       DATABASE_URL: postgres://${POSTGRES_USER:-suez}:${POSTGRES_PASSWORD:-suez}@postgres:5432/${POSTGRES_DB:-suez}?sslmode=disable
       POSTGRES_ADDR: postgres:5432
       REDIS_ADDR: redis:6379
-      OPA_HEALTH_URL: http://opa:8181/v1/data/suez/authz/allow
+      OPA_HEALTH_URL: http://opa:8181/health
       OPA_DECISION_URL: http://opa:8181/v1/data/suez/authz/decision
       CONTROL_PLANE_HEALTH_URL: http://control-plane:8081/healthz
       AUTH_RESOLVER_URL: http://control-plane:8081/internal/auth/resolve
@@ -191,9 +217,9 @@ services:
       policy-llm:
         condition: service_healthy
     ports:
-      - "${GATEWAY_PORT:-8080}:8080"
+      - "${BIND_ADDRESS:-127.0.0.1}:${GATEWAY_PORT:-8080}:8080"
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/ >/dev/null || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz >/dev/null || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -216,7 +242,7 @@ services:
       gateway:
         condition: service_healthy
     ports:
-      - "${PORTAL_UI_PORT:-5173}:5173"
+      - "${BIND_ADDRESS:-127.0.0.1}:${PORTAL_UI_PORT:-5173}:5173"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5173 >/dev/null || exit 1"]
       interval: 10s
@@ -244,7 +270,7 @@ services:
       policy-llm:
         condition: service_healthy
     ports:
-      - "${EDGE_HTTPS_PORT:-5443}:5443"
+      - "${BIND_ADDRESS:-127.0.0.1}:${EDGE_HTTPS_PORT:-5443}:5443"
     volumes:
       - ../tls/Caddyfile:/etc/caddy/Caddyfile:ro
       - ../tls/generated:/certs:ro

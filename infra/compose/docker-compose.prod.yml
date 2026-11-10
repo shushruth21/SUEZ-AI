@@ -1,0 +1,180 @@
+# PRODUCTION example. Differences from the development stack:
+#   - only the HTTPS edge publishes a port; Postgres, Redis and OPA sit on an
+#     internal network with no route to or from the outside;
+#   - every secret must be supplied (`${VAR:?}` stops compose if one is missing)
+#     and the services themselves refuse to start with unsafe settings;
+#   - no demo seeds, no demo credentials, no shared-secret JWT mode;
+#   - the portal is a static build, not a dev server.
+#
+# Use a managed PostgreSQL and Redis where you can and drop those two services;
+# they are here so the example is complete. See docs/operations/DEPLOYMENT.md.
+#
+#   docker compose --env-file .env.production -f infra/compose/docker-compose.prod.yml up -d
+
+x-suez-env: &suez-env
+  SUEZ_ENV: production
+  SUEZ_INTERNAL_TOKEN: ${SUEZ_INTERNAL_TOKEN:?set SUEZ_INTERNAL_TOKEN (32+ random characters)}
+  CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:?set CORS_ALLOWED_ORIGINS, e.g. https://suez.example.com}
+  TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-172.16.0.0/12}
+  DATABASE_URL: postgres://${POSTGRES_USER:?set POSTGRES_USER}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@${POSTGRES_HOST:-postgres}:5432/${POSTGRES_DB:-suez}?sslmode=${POSTGRES_SSLMODE:-disable}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-suez}
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [data]
+
+  migrate:
+    image: postgres:16-alpine
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST:-postgres}:5432/${POSTGRES_DB:-suez}?sslmode=${POSTGRES_SSLMODE:-disable}
+    # Migrations only: seeds are demo data and are never loaded here.
+    entrypoint: ["/bin/sh", "/scripts/migrate.sh", "/db/migrations"]
+    volumes:
+      - ../../scripts/migrate.sh:/scripts/migrate.sh:ro
+      - ../db/migrations:/db/migrations:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [data]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD}", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    networks: [data]
+
+  opa:
+    build:
+      context: ../../infra/opa
+    restart: unless-stopped
+    networks: [data]
+
+  control-plane:
+    build:
+      context: ../../apps/control-plane
+    restart: unless-stopped
+    environment:
+      <<: *suez-env
+      PORT: 8081
+      JWT_MODE: ${JWT_MODE:?set JWT_MODE to jwks or disabled}
+      JWT_ISSUER: ${JWT_ISSUER:-}
+      JWT_AUDIENCE: ${JWT_AUDIENCE:-}
+      JWT_JWKS_URL: ${JWT_JWKS_URL:-}
+      JWT_ALLOWED_ALGS: ${JWT_ALLOWED_ALGS:-RS256,ES256}
+      SUEZ_KEY_PROVIDER: local
+      SUEZ_DATA_KEY_FILE: /run/secrets/suez_data_key
+      SUEZ_DATA_KEY_PREVIOUS: ${SUEZ_DATA_KEY_PREVIOUS:-}
+      OPA_BASE_URL: http://opa:8181
+      OPA_DECISION_URL: http://opa:8181/v1/data/suez/authz/decision
+      OPA_HEALTH_URL: http://opa:8181/health
+      POLICY_LLM_URL: ${POLICY_LLM_URL:-http://policy-llm:11434/api/tags}
+      POLICY_LLM_BASE_URL: ${POLICY_LLM_BASE_URL:-http://policy-llm:11434}
+    secrets: [suez_data_key]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      opa:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8081/readyz >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    # "egress" is needed to reach the identity provider's JWKS endpoint.
+    networks: [data, backend, egress]
+
+  gateway:
+    build:
+      context: ../../apps/gateway
+    restart: unless-stopped
+    environment:
+      <<: *suez-env
+      PORT: 8080
+      REDIS_URL: redis://:${REDIS_PASSWORD}@${REDIS_HOST:-redis}:6379/0
+      OPA_DECISION_URL: http://opa:8181/v1/data/suez/authz/decision
+      OPA_HEALTH_URL: http://opa:8181/health
+      CONTROL_PLANE_HEALTH_URL: http://control-plane:8081/healthz
+      CONTROL_PLANE_INTERNAL_URL: http://control-plane:8081
+      AUTH_RESOLVER_URL: http://control-plane:8081/internal/auth/resolve
+      OPENAI_COMPAT_BASE_URL: ${OPENAI_COMPAT_BASE_URL:-https://api.openai.com/v1}
+      OPENAI_COMPAT_API_KEY_FILE: /run/secrets/openai_compat_api_key
+      GROQ_API_KEY_FILE: /run/secrets/groq_api_key
+    secrets: [openai_compat_api_key, groq_api_key]
+    depends_on:
+      control-plane:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/readyz >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    # "egress" is needed to reach model providers.
+    networks: [data, backend, egress]
+
+  portal:
+    build:
+      context: ../../apps/portal-ui
+      dockerfile: Dockerfile.prod
+    restart: unless-stopped
+    networks: [backend]
+
+  edge:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    environment:
+      EDGE_HOST: ${EDGE_HOST:?set EDGE_HOST to the public host name}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL for certificate issuance}
+    ports:
+      # The only published ports in the stack.
+      - "${EDGE_BIND:-0.0.0.0}:443:443"
+      - "${EDGE_BIND:-0.0.0.0}:80:80"
+    volumes:
+      - ../tls/Caddyfile.prod:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    depends_on:
+      gateway:
+        condition: service_healthy
+      control-plane:
+        condition: service_healthy
+    networks: [backend, egress]
+
+networks:
+  # No route in or out: databases and the policy engine live here.
+  data:
+    internal: true
+  backend:
+    internal: true
+  egress: {}
+
+volumes:
+  postgres-data:
+  caddy-data:
+
+secrets:
+  suez_data_key:
+    file: ${SUEZ_DATA_KEY_PATH:?set SUEZ_DATA_KEY_PATH to a file holding the 32-byte data key (base64)}
+  openai_compat_api_key:
+    file: ${OPENAI_COMPAT_API_KEY_PATH:-/dev/null}
+  groq_api_key:
+    file: ${GROQ_API_KEY_PATH:-/dev/null}

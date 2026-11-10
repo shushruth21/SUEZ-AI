@@ -6,7 +6,11 @@ https://{$EDGE_HOST}:{$EDGE_HTTPS_PORT} {
 	tls /certs/localhost-fullchain.pem /certs/localhost.key
 
 	handle /control-plane/internal* {
-		respond 403
+		respond 404
+	}
+
+	handle /gateway/internal* {
+		respond 404
 	}
 
 	handle_path /control-plane/* {
@@ -14,7 +18,9 @@ https://{$EDGE_HOST}:{$EDGE_HTTPS_PORT} {
 	}
 
 	handle_path /gateway/* {
-		reverse_proxy gateway:8080
+		reverse_proxy gateway:8080 {
+			flush_interval -1
+		}
 	}
 
 	# OPA and Ollama have no authentication: through the edge, anyone could
