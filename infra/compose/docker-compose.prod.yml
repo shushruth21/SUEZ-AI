@@ -147,8 +147,8 @@ services:
       ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL for certificate issuance}
     ports:
       # The only published ports in the stack.
-      - "${EDGE_BIND:-0.0.0.0}:443:443"
-      - "${EDGE_BIND:-0.0.0.0}:80:80"
+      - "${EDGE_BIND:-0.0.0.0}:${EDGE_HTTPS_PUBLISH:-443}:443"
+      - "${EDGE_BIND:-0.0.0.0}:${EDGE_HTTP_PUBLISH:-80}:80"
     volumes:
       - ../tls/Caddyfile.prod:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
@@ -157,6 +157,8 @@ services:
         condition: service_healthy
       control-plane:
         condition: service_healthy
+      portal:
+        condition: service_started
     networks: [backend, egress]
 
 networks:

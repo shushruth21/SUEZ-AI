@@ -64,7 +64,10 @@ services:
     networks:
       - suez-net
 
+  # Optional local model for natural-language policy drafts. Without it the
+  # control plane drafts from a template. Start with: --profile llm
   policy-llm:
+    profiles: ["llm"]
     build:
       context: ../../infra/policy-llm
       dockerfile: Dockerfile
@@ -86,6 +89,7 @@ services:
           - policy-llm
 
   policy-llm-init:
+    profiles: ["llm"]
     image: ollama/ollama:0.3.14
     entrypoint:
       - /bin/sh
@@ -164,10 +168,6 @@ services:
         condition: service_healthy
       opa:
         condition: service_started
-      policy-llm:
-        condition: service_healthy
-      policy-llm-init:
-        condition: service_completed_successfully
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${CONTROL_PLANE_PORT:-8081}:8081"
     healthcheck:
@@ -214,8 +214,6 @@ services:
         condition: service_healthy
       opa:
         condition: service_started
-      policy-llm:
-        condition: service_healthy
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${GATEWAY_PORT:-8080}:8080"
     healthcheck:
@@ -267,10 +265,10 @@ services:
         condition: service_healthy
       opa:
         condition: service_started
-      policy-llm:
-        condition: service_healthy
     ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:${EDGE_HTTPS_PORT:-5443}:5443"
+      # Caddy listens on EDGE_HTTPS_PORT inside the container too, so the URL
+      # the browser uses and the certificate host:port agree.
+      - "${BIND_ADDRESS:-127.0.0.1}:${EDGE_HTTPS_PORT:-5443}:${EDGE_HTTPS_PORT:-5443}"
     volumes:
       - ../tls/Caddyfile:/etc/caddy/Caddyfile:ro
       - ../tls/generated:/certs:ro
