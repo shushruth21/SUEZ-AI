@@ -13,7 +13,7 @@ compose up -d --build --wait gateway
 status=0
 docker run --rm --network suez-e2e_default --network-alias e2e \
   -v "$ROOT/tests/e2e":/src -w /src -v suez-gomod:/go/pkg/mod \
-  -e SUEZ_E2E=1 golang:1.22 go test -count=1 -tags e2e -timeout 10m "$@" ./... || status=$?
+  -e SUEZ_E2E=1 golang:1.26 go test -count=1 -tags e2e -timeout 10m "$@" ./... || status=$?
 if [ "$status" -ne 0 ]; then
   echo "---- control-plane log (tail) ----"; compose logs --no-color --tail 40 control-plane || true
   echo "---- gateway log (tail) ----"; compose logs --no-color --tail 40 gateway || true
