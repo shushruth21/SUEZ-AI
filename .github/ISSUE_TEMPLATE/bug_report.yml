@@ -1,0 +1,44 @@
+name: Bug report
+description: Something does not work as documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not report security vulnerabilities here.** Follow SECURITY.md instead.
+        Never paste API keys, `.env` contents, checkpoints or project memory. Redact them.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options: [Gateway, Control plane, OPA policies, SUEZ Memory, Portal, Context Guardian, Deployment / compose, Docs]
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Commands, requests (with keys redacted) and the trace id (`X-SUEZ-Trace-Id`) if you have one.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Commit or version
+      placeholder: e.g. 15e90d0
+  - type: dropdown
+    id: env
+    attributes:
+      label: Environment
+      options: [Development stack, Staging, Production, Context Guardian on macOS]
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      render: text

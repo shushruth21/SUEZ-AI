@@ -26,8 +26,8 @@ SUEZ has two independently runnable parts that talk over one HTTP endpoint.
 | Component | Path | Language / stack | Responsibility |
 | --- | --- | --- | --- |
 | **SUEZ Context Guardian** | `apps/context-guardian/` | Tauri 2, Rust, React 18, TypeScript, Vite | Desktop widget: shows context usage, saves checkpoint drafts at 85 %, warns at 95 %, keeps local checkpoint history and project memory, builds continuation prompts. |
-| **Gateway** | `apps/gateway/` | Go 1.22, net/http, pgx, go-redis | Runtime enforcement for `/v1/chat/completions` and `/v1/tools/execute`: identity, grants, OPA decision, quotas, response cache, provider call, audit. Records per-session context usage and serves `GET /v1/context/usage`. |
-| **Control plane** | `apps/control-plane/` | Go 1.22 | Identity resolution for the gateway, tenants, API keys, access requests/grants, model and tool catalog, policy lifecycle (draft → validate → test → publish → rollback), audit log API. |
+| **Gateway** | `apps/gateway/` | Go 1.26, net/http, pgx, go-redis | Runtime enforcement for `/v1/chat/completions` and `/v1/tools/execute`: identity, grants, OPA decision, quotas, response cache, provider call, audit. Records per-session context usage and serves `GET /v1/context/usage`. |
+| **Control plane** | `apps/control-plane/` | Go 1.26 | Identity resolution for the gateway, tenants, API keys, access requests/grants, model and tool catalog, policy lifecycle (draft → validate → test → publish → rollback), audit log API. |
 | **Portal UI** | `apps/portal-ui/` | React 18, TypeScript, Vite | Admin and requester web UI for the control plane and gateway. |
 | **OPA** | `infra/opa/` | Open Policy Agent, Rego | Allow/deny decisions with reasons. |
 | **policy-llm** | `infra/policy-llm/` | Ollama (local open-weight model) | Natural-language → Rego draft generation for the control plane. |
@@ -275,9 +275,10 @@ Summarised here; the full flows are in [gateway-architecture.md](gateway-archite
 - **Authentication.** Clients send an API key (`X-API-Key` or
   `Authorization`) or a JWT. The gateway forwards the credential to the
   control plane's `/internal/auth/resolve`, which returns an identity context
-  (tenant, actor, roles). API keys are stored as SHA-256 hashes. **JWT
-  signatures are not verified** in the current local runtime — claims are only
-  decoded (see [SECURITY-AND-PRIVACY.md](SECURITY-AND-PRIVACY.md)).
+  (tenant, actor, roles). API keys are stored as SHA-256 hashes and carry
+  scopes, expiry and model/tool allowlists. JWTs are verified against the
+  identity provider's JWKS (`JWT_MODE=jwks`); see
+  [production/ARCHITECTURE.md](production/ARCHITECTURE.md).
 - **Chat flow.** Model lookup → active grant → OPA decision → Redis quota →
   Redis cache → provider (`stub`, `openai-compatible`, `groq`) → cache write →
   audit row → context-usage row (only when the session header is present and
@@ -384,8 +385,9 @@ See also [ROADMAP.md](ROADMAP.md) and the [README](../README.md#known-issues-and
 - Provider-reported token counts have not been tested against a live paid provider.
 - Context Guardian is built and tested on macOS (Apple Silicon); Keychain code
   for Windows is compiled in but untested; Linux is untested.
-- The gateway stack is a local-development runtime (unverified JWTs, demo
-  credentials, permissive CORS, self-signed TLS). It is not production-hardened.
+- The **development** compose stack keeps demo credentials, permissive CORS and
+  self-signed TLS on purpose. Production settings and their remaining limits
+  are in [production/LIMITATIONS.md](production/LIMITATIONS.md).
 - `context_usage_measurements` has no retention policy.
 - Project memory is local to one machine and not synchronised.
 

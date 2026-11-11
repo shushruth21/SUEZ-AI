@@ -48,7 +48,19 @@ SUEZ Memory
   audited injection, export, deletion, retention, envelope encryption and
   secret redaction. Context Guardian uses these APIs through the gateway.
 
+Staging and distribution
+- `scripts/staging.sh` runs a production-mode staging stack on one machine,
+  published through a Cloudflare quick tunnel. Each tester gets an isolated
+  tenant and expiring keys (`add-tester`, `list`, `revoke`).
+- `make dmg` builds Context Guardian into `./ContextGuardian.dmg`
+  (git-ignored).
+- Fixes: migrations wait for PostgreSQL to accept TCP connections; health
+  checks use TCP; the CSP allows Google Fonts for the portal.
+
 Documentation and tests
+- README rewritten for the current state; `docs/API.md` reference;
+  architecture decision records in `docs/adr/`; pull request and issue
+  templates, CODEOWNERS and Dependabot configuration.
 - docs/production: threat model, architecture, configuration, runbooks,
   go-live checklist, verified limitations and verification record.
 - Full-stack e2e suite (`scripts/e2e.sh`) and CI jobs for it, govulncheck,

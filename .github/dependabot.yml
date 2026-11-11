@@ -1,0 +1,21 @@
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directories: ["/apps/gateway", "/apps/control-plane", "/tests/e2e"]
+    schedule: { interval: weekly }
+    groups:
+      go-minor: { update-types: [minor, patch] }
+  - package-ecosystem: npm
+    directories: ["/apps/portal-ui", "/apps/context-guardian"]
+    schedule: { interval: weekly }
+    groups:
+      npm-minor: { update-types: [minor, patch] }
+  - package-ecosystem: cargo
+    directory: /apps/context-guardian/src-tauri
+    schedule: { interval: weekly }
+  - package-ecosystem: docker
+    directories: ["/apps/gateway", "/apps/control-plane", "/apps/portal-ui", "/infra/opa"]
+    schedule: { interval: weekly }
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }

@@ -8,12 +8,12 @@ vulnerabilities see [SECURITY.md](../SECURITY.md).
 
 ## Summary
 
-| Area | Context Guardian (desktop) | Gateway stack (local) |
+| Area | Context Guardian (desktop) | Gateway stack |
 | --- | --- | --- |
 | Credentials | Gateway API key in the OS credential store (macOS Keychain), accessed only from Rust | Provider keys from env vars or `infra/secrets/*`; client API keys stored as SHA-256 hashes |
-| Data at rest | Plain JSON in the app-data directory (not encrypted by the app) | PostgreSQL volume, Redis (not encrypted by SUEZ) |
-| Network | HTTP(S) to the configured gateway URL only | Local Docker network; HTTPS edge with a locally generated certificate |
-| Hardening | Secret guard on save and copy; key scrubbing in errors | **Not production-hardened** (see below) |
+| Data at rest | Plain JSON in the app-data directory (not encrypted by the app) | PostgreSQL and Redis; SUEZ Memory content is envelope-encrypted (AES-256-GCM) by the control plane |
+| Network | HTTP(S) to the configured gateway URL only | Only the Caddy edge is public in production (ACME TLS); development uses a locally generated certificate |
+| Hardening | Secret guard on save and copy; key scrubbing in errors | Production mode (`SUEZ_ENV=production`) refuses unsafe settings; see [production/THREAT-MODEL.md](production/THREAT-MODEL.md) |
 
 ## Context Guardian
 

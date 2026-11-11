@@ -89,7 +89,7 @@ cd apps/control-plane && go vet ./... && go test -count=1 ./...
 Without Go installed:
 
 ```sh
-docker run --rm -v "$PWD/apps/gateway":/src -w /src golang:1.22-alpine \
+docker run --rm -v "$PWD/apps/gateway":/src -w /src golang:1.26-alpine \
   sh -c 'go vet ./... && go test -count=1 ./...'
 ```
 
@@ -97,9 +97,41 @@ docker run --rm -v "$PWD/apps/gateway":/src -w /src golang:1.22-alpine \
   classification, the `/v1/context/usage` handler (statuses, tenant/actor
   isolation, cache hits, unknown window, missing migration → 503) and
   authentication.
-- The **control plane has no automated tests**. Most gateway enforcement
-  (grants, OPA, quotas, cache, tools) has **no automated tests**; it is
-  exercised by the demo scripts in `scripts/`.
+- Control-plane unit tests cover JWT verification (JWKS, algorithms, claims,
+  rotation), scoped keys, the permission table, encryption, redaction and
+  policy package isolation.
+- Enforcement across services (grants, OPA, quotas, cache, tools, memory) is
+  covered by the end-to-end suite below.
+
+### End-to-end suite
+
+`scripts/e2e.sh` starts a fresh, throwaway stack (PostgreSQL, Redis, OPA,
+control plane, gateway, a mock identity provider and a mock
+OpenAI-compatible provider), runs `tests/e2e`, and tears it down:
+
+```sh
+sh scripts/e2e.sh -v
+```
+
+| Group | Checks |
+| --- | --- |
+| A | Health probes and what is (not) exposed |
+| B | JWT verification: signatures, issuer, audience, expiry, key rotation |
+| C | Scoped API keys: scopes, expiry, revocation, allowlists, no escalation |
+| D | Tenant isolation across every API |
+| E | OPA policy isolation and sandboxed policy tests |
+| F | Tool secrets never leak |
+| G | Optional parameters, cache keys, provider errors |
+| H | Fail-closed quotas and streaming |
+| I | Context thresholds, checkpoint drafts and continuation |
+| J | No secrets in stored records |
+| K | SUEZ Memory through the gateway |
+
+### OPA policies
+
+```sh
+docker run --rm -v "$PWD/infra/opa/policies:/p:ro" openpolicyagent/opa:1.4.2 test /p -v
+```
 
 ### Integration test
 
@@ -112,7 +144,7 @@ With the Context Guardian test stack running (`npm run test-stack -- up` in
 docker run --rm --network cg-test-net \
   -e DATABASE_URL="postgres://suez:cgtest@cg-test-postgres:5432/suez?sslmode=disable" \
   -e REDIS_URL="redis://cg-test-redis:6379/0" \
-  -v "$PWD/apps/gateway":/src -w /src golang:1.22-alpine \
+  -v "$PWD/apps/gateway":/src -w /src golang:1.26-alpine \
   go test -tags integration -count=1 ./...
 ```
 

@@ -1,253 +1,195 @@
 # SUEZ
 
-**SUEZ** is a local-first AI governance gateway and the **SUEZ Context
-Guardian** desktop app built on it.
+**SUEZ** is a multi-tenant AI governance gateway, plus **SUEZ Context
+Guardian**, a desktop companion app built on top of it.
 
-The **gateway stack** sits between applications and AI models or tools. It
-enforces grants, policies and quotas, and records an audit trail.
-**Context Guardian** is a small floating widget that watches how full an AI
-conversation's context window is. It saves a checkpoint before work is lost
-and turns that checkpoint into a prompt for a fresh session.
+- **The gateway** sits between your applications and AI models or tools. For
+  every call it checks who is calling, applies access grants, OPA policies and
+  quotas, and writes an audit trail.
+- **SUEZ Memory** stores session evidence and reviewed checkpoints, so long AI
+  work can continue in a fresh session without losing decisions or progress.
+- **Context Guardian** is a small floating window that shows how full a
+  conversation's context window is. It warns you before the window fills and
+  helps you checkpoint and continue.
 
-> **Status: early-stage, local-development software.** Everything here runs on
-> a developer machine with Docker Compose and a native macOS app. Nothing in
-> this repository is production-hardened. See
-> [Known issues and limitations](#known-issues-and-limitations).
+[![CI](https://github.com/shushruth21/SUEZ-AI/actions/workflows/ci.yml/badge.svg)](https://github.com/shushruth21/SUEZ-AI/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+> **Status: pre-release, ready for staging.** The production configuration has
+> been hardened and verified locally: unit, policy and end-to-end tests,
+> vulnerability scans, and a backup/restore drill. It has **not** yet run real
+> production traffic, a cloud KMS, a paid model provider or a multi-replica
+> load test. See [Known limitations](#known-limitations) and
+> [docs/production/VERIFICATION.md](docs/production/VERIFICATION.md).
 
 ---
 
 ## Contents
 
-- [The problem](#the-problem)
-- [Vision](#vision)
-- [What exists today](#what-exists-today)
-- [Feature status](#feature-status)
+- [Why SUEZ](#why-suez)
+- [Features](#features)
 - [Architecture](#architecture)
-- [Technology stack](#technology-stack)
-- [Repository structure](#repository-structure)
-- [Getting started](#getting-started)
-- [Configuration](#configuration)
+- [Quick start](#quick-start)
+- [Sharing a staging environment with testers](#sharing-a-staging-environment-with-testers)
+- [Deploying to production](#deploying-to-production)
+- [API overview](#api-overview)
+- [Security model](#security-model)
 - [Testing](#testing)
-- [Building the desktop app](#building-the-desktop-app)
-- [Security and privacy](#security-and-privacy)
-- [Context Guardian in depth](#context-guardian-in-depth)
-- [Known issues and limitations](#known-issues-and-limitations)
-- [Roadmap](#roadmap)
+- [Repository layout](#repository-layout)
+- [Technology stack](#technology-stack)
+- [Known limitations](#known-limitations)
+- [Documentation](#documentation)
 - [Contributing](#contributing)
 - [License](#license)
-- [Support](#support)
-- [Documentation index](#documentation-index)
 
-## The problem
+## Why SUEZ
 
-Teams adopting AI face two separate problems:
+Teams adopting AI hit two problems:
 
-1. **Ungoverned access.** Applications call models and tools directly, with no
-   central place to grant access, apply policy, cap usage or audit what happened.
-2. **Lost working context.** Long AI-assisted sessions silently approach the
-   model's context limit. When the window fills, or a session has to be
-   restarted, the decisions, progress and next steps live only in a
-   conversation that is about to be truncated.
+1. **Ungoverned access.** Applications call models and tools directly. There
+   is no single place to grant access, apply policy, cap spending or see what
+   happened.
+2. **Lost working context.** Long AI-assisted sessions quietly approach the
+   model's context limit. When the window fills, decisions and progress are
+   lost with the conversation.
 
-## Vision
+SUEZ puts one control point in front of AI traffic, and keeps the working
+state of long sessions in a form that can be reviewed and carried forward.
 
-A single control point for AI traffic, plus tooling that makes long
-AI-assisted work resumable and honest:
+## Features
 
-- All AI calls flow through a gateway that knows *who* is calling *what*, under
-  *which* policy.
-- A desktop companion that measures context usage where it can, never invents
-  numbers where it cannot, and preserves project state across sessions. It
-  keeps a clear line between what was verified and what was merely reported.
+### Gateway and control plane
 
-The SaaS/enterprise direction is described in design documents under
-[`docs/saas/`](docs/saas/). It is **planned, not implemented**.
+| Feature | Details |
+| --- | --- |
+| OpenAI-compatible API | `POST /v1/chat/completions` (including streaming) and `POST /v1/tools/execute` |
+| Identity | Scoped API keys, and JWTs verified against your identity provider (OIDC discovery, JWKS, key rotation, fail closed) |
+| Authorization | One permission table for every route. Keys carry scopes, expiry, model and tool allowlists and rate limits, and can never exceed the key that created them |
+| Multi-tenancy | Every query is scoped to the caller's tenant; covered by end-to-end isolation tests |
+| Policy | OPA (Rego) policies per tenant: draft, generate with a local model, validate, test in a sandbox, publish, roll back |
+| Quotas and caching | Redis-backed quotas that fail closed; a response cache keyed on everything that affects the answer, including the policy version |
+| Providers | Built-in stub model (free, no network), OpenAI-compatible endpoints and Groq, with safe retries and normalized errors |
+| Context thresholds | Per tenant and model: notice, checkpoint, warning and optional hard block, reported in `X-SUEZ-Context-*` response headers |
+| Audit | Every decision is recorded with a trace id; secrets are redacted before anything is stored |
 
-## What exists today
+### SUEZ Memory
 
-**Gateway stack** (Docker Compose, `infra/compose/docker-compose.yml`):
+- Tenant-scoped sessions that record evidence (what really happened) apart
+  from generated text.
+- Summaries that cite their sources.
+- Checkpoints that start as drafts and must be approved before reuse.
+- Continuation prompts built within a token budget.
+- Injection into a chat request only when asked for, allowed by policy and
+  audited.
+- Export, deletion and retention settings.
+- Content encrypted at rest (AES-256-GCM envelope encryption) and secrets
+  redacted before storage.
 
-- OpenAI-style `POST /v1/chat/completions` and `POST /v1/tools/execute`, each
-  call going through:
-  - identity resolution;
-  - an access-grant check;
-  - an OPA policy decision;
-  - Redis-backed quotas and response caching;
-  - an audit log.
-- Model providers: an in-process **stub** (no external calls),
-  **OpenAI-compatible** endpoints and **Groq**.
-- A control plane for:
-  - tenants, API keys and access requests/grants;
-  - the model and tool catalog;
-  - the policy lifecycle: draft, generate (with a local Ollama model),
-    validate, test, publish, roll back;
-  - the audit log.
-- A React portal for admins and requesters, behind a local HTTPS edge (Caddy).
-- **Per-session context-usage measurement** for chat requests tagged with
-  `X-SUEZ-Session-Id`, served by `GET /v1/context/usage`. This requires
-  migration `0006`.
+### Context Guardian (macOS desktop app)
 
-**SUEZ Context Guardian** (`apps/context-guardian/`, Tauri 2 desktop app, tested on macOS):
-
-- A floating, always-on-top usage monitor with two sources:
-  - **Mock** (simulated, labelled `MOCK DATA`);
-  - **SUEZ gateway** (measured by the gateway for one session id).
-- An **85%** threshold that saves exactly one checkpoint **draft** and opens
-  the editor. A **95%** threshold raises a critical warning.
-- A structured checkpoint editor, local history, and a continuation-prompt
-  generator with copy to clipboard.
-- **Persistent project memory**: one versioned record per project. Every change
-  is previewed and explicitly approved; revisions can be restored.
-- **Evidence-aware progress**: a work item can be marked `verified` only with
-  evidence from the same session. Carried-over claims become `reported`, and
-  carried test results are labelled "NOT rerun".
-- The gateway API key is kept in the macOS Keychain and never reaches the UI,
-  checkpoint files or prompts.
-
-## Feature status
-
-Legend:
-- ✅ **Implemented and tested**: automated tests exist and were run.
-- 🟡 **Implemented, incompletely tested**.
-- 🧩 **Partial**.
-- 📝 **Planned**.
-- ⛔ **Unsupported**.
-
-| Area | Feature | Status | Notes |
-| --- | --- | --- | --- |
-| Context Guardian | Floating always-on-top widget | 🟡 | Window rendering and resizing are covered by native smoke tests. Dragging is checked by hand only. |
-| Context Guardian | Mock usage source | ✅ | Always labelled `MOCK DATA`; it is not telemetry. |
-| Context Guardian | 85% checkpoint draft (one per crossing, no duplicate after restart) | ✅ | Unit and native smoke tests (mock and gateway). |
-| Context Guardian | 95% critical warning | ✅ | Unit and native smoke tests. |
-| Context Guardian | Checkpoint editor, history, local JSON storage, schema v1→v2 with backup | ✅ | Rust and TypeScript unit tests; native smoke tests. |
-| Context Guardian | Continuation prompt | ✅ | Includes a byte-for-byte compatibility test for legacy checkpoints. |
-| Context Guardian | Gateway usage source (stale, unavailable and auth states) | ✅ | Tested against a throwaway gateway stack with the **free stub model** only. |
-| Context Guardian | API key in macOS Keychain | 🟡 | Covered by the gateway smoke test. The direct Keychain round-trip test is opt-in (`--ignored`). Windows and Linux are untested. |
-| Context Guardian | Persistent project memory (import, merge, approvals, revisions, recovery) | ✅ | New. Unit tests and a native smoke test. Local to one machine and not synced. |
-| Context Guardian | Evidence-aware progress tracking | ✅ | Enforced in Rust and in the UI. |
-| Context Guardian | Automatic summarisation of AI conversations | ⛔ | The app cannot read conversations; checkpoint content is written or pasted by you. |
-| Context Guardian | Reading Claude.ai, Claude Code, ChatGPT/Codex or Cursor sessions | ⛔ | No such integration exists. Only traffic sent **through the SUEZ gateway** can be measured. |
-| Context Guardian | Windows / Linux builds | ⛔ | Not built or tested. The release is Apple Silicon only and ad-hoc signed. |
-| Gateway | Chat completions, tools, grants, OPA, quotas, cache, audit | 🟡 | Exercised by demo scripts. Automated Go tests exist only for context-usage code. |
-| Gateway | Context-usage measurement and `GET /v1/context/usage` | ✅ | Go unit tests, plus an integration test against throwaway PostgreSQL/Redis. |
-| Gateway | Provider-reported token counts (OpenAI-compatible / Groq) | 🟡 | Implemented. **Not tested against a live paid provider.** |
-| Gateway | `models.context_window` management | 🧩 | Column exists after migration 0006. It can only be set with SQL; there is no API or UI yet. |
-| Control plane | Tenants, keys, access workflow, catalog, policy lifecycle, audit API | 🟡 | No automated Go tests. Exercised manually and by demo scripts. |
-| Control plane | JWT signature verification | ⛔ | JWT claims are decoded **without signature verification** in the local runtime. |
-| Portal UI | Admin and requester UI | 🟡 | Type check and build only; no UI tests. |
-| Platform | Enterprise SaaS on AWS (EKS, SSO, multi-tenancy) | 📝 | Design documents and experimental scripts only. Not verified. |
-| Platform | Retention policy for context-usage measurements | 📝 | Rows are kept indefinitely. |
+- Always-on-top usage meter. Its source is either the SUEZ gateway, measured
+  per session, or a clearly labelled mock.
+- Uses the tenant's thresholds. When usage crosses the checkpoint threshold
+  it saves one draft and opens the editor.
+- Checkpoint editor, history and continuation prompts, plus a panel of
+  checkpoints stored on the server.
+- Versioned project memory: every change is previewed and approved, and
+  revisions can be restored.
+- Evidence-aware progress tracking: an item is "verified" only with evidence
+  from the same session.
+- The API key lives in the macOS Keychain and never reaches the UI, files or
+  prompts.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    subgraph Desktop["Developer machine"]
-        CG["Context Guardian<br/>React UI + Rust core"]
-        Local[("Local app data<br/>checkpoints · project memory")]
-        KC[("macOS Keychain<br/>gateway API key")]
-        CG --- Local
-        CG --- KC
+    subgraph Clients
+        App["Your application<br/>(OpenAI-style client)"]
+        CG["Context Guardian<br/>(Tauri desktop app)"]
+        Browser["Portal in a browser"]
     end
-    subgraph Stack["SUEZ gateway stack (Docker Compose)"]
-        GW["Gateway (Go)"]
-        CP["Control plane (Go)"]
-        Portal["Portal UI"]
-        OPA["OPA"]
-        PLLM["policy-llm (Ollama)"]
-        PG[("PostgreSQL")]
-        RD[("Redis")]
-        Portal --> CP & GW
-        GW --> CP & OPA & PG & RD
-        CP --> PG & OPA & PLLM
+
+    subgraph Edge["Public edge"]
+        Caddy["Caddy<br/>TLS · security headers<br/>blocks /internal and /opa"]
     end
-    Client["Your chat client<br/>(X-SUEZ-Session-Id)"] -->|chat requests| GW
-    CG -->|"GET /v1/context/usage<br/>(token counts only)"| GW
-    GW -.->|optional| Providers["OpenAI-compatible / Groq"]
+
+    subgraph Private["Private network"]
+        GW["Gateway (Go)<br/>auth · grants · OPA · quotas<br/>cache · providers · thresholds"]
+        CP["Control plane (Go)<br/>identity · keys · catalog<br/>policies · audit · SUEZ Memory"]
+        Portal["Portal (React)"]
+        OPA["OPA<br/>per-tenant policy packages"]
+        PG[("PostgreSQL<br/>encrypted memory")]
+        RD[("Redis<br/>quotas · cache")]
+    end
+
+    IdP["Identity provider<br/>(OIDC / JWKS)"]
+    LLM["Model providers<br/>OpenAI-compatible · Groq"]
+
+    App & CG -->|/gateway| Caddy
+    Browser --> Caddy
+    Caddy --> GW & CP & Portal
+    GW -->|internal token| CP
+    GW --> OPA & RD & PG
+    CP --> PG & OPA
+    CP -.->|JWKS| IdP
+    GW -.-> LLM
 ```
 
-Checkpoints and project memory **stay on your machine**. The app sends the
-gateway only a session id and the API key header, and receives token counts
-and status.
+A chat request goes through: identity → permission → model grant and key
+allowlist → OPA decision → quota → cache → provider → context thresholds and
+memory capture → audit.
 
-Read more:
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): components, flows, data
-  ownership and decisions.
-- [docs/gateway-architecture.md](docs/gateway-architecture.md): gateway request
-  flows, data model and APIs.
-- Diagram sources:
-  - [system overview](docs/architecture/system-overview.mmd)
-  - [context monitoring](docs/architecture/context-monitoring-flow.mmd)
-  - [checkpoint lifecycle](docs/architecture/checkpoint-lifecycle.mmd)
-  - [deployment topology](docs/architecture/deployment-topology.mmd)
+Details:
+- [docs/production/ARCHITECTURE.md](docs/production/ARCHITECTURE.md): trust
+  boundaries, data flow, isolation and caching.
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): components and Context Guardian.
+- [docs/adr/](docs/adr/): architecture decision records.
 
-## Technology stack
+## Quick start
 
-| Layer | Technology |
-| --- | --- |
-| Desktop app | Tauri 2 (Rust), React 18, TypeScript 5, Vite 8, Vitest; `keyring` for the OS credential store; `reqwest` for HTTP |
-| Gateway, control plane | Go 1.22 (`net/http`, `pgx`, `go-redis`) |
-| Portal | React 18, TypeScript, Vite |
-| Policy | Open Policy Agent (Rego); Ollama with a small open-weight model for policy drafting |
-| Data | PostgreSQL 16, Redis 7 |
-| Edge / runtime | Caddy 2, Docker Compose |
-
-## Repository structure
-
-```text
-apps/
-  context-guardian/     Tauri desktop app (React UI in src/, Rust core in src-tauri/)
-  gateway/              Go gateway service
-  control-plane/        Go control-plane service
-  portal-ui/            React admin/requester portal
-infra/
-  compose/              docker-compose.yml for the local stack
-  db/                   SQL migrations and demo seeds
-  opa/                  OPA image and Rego policies
-  policy-llm/           Ollama image for policy drafting
-  secrets/              (empty) optional file-backed provider keys; contents git-ignored
-  tls/                  Caddyfile; generated certificates are git-ignored
-packages/shared/        placeholder
-scripts/                demo, backup/restore, TLS bootstrap and experimental AWS scripts
-docs/                   architecture, operations, testing, security and design docs
-.github/workflows/      CI (type checks, unit tests, builds; no secrets, no deploys)
-```
-
-## Getting started
-
-Prerequisites:
+### Prerequisites
 
 | For | You need |
 | --- | --- |
-| Gateway stack | Docker (Desktop or compatible) with Compose v2; GNU Make |
-| Context Guardian | macOS on Apple Silicon (the tested platform); Node.js ≥ 20.19 (22 used in CI); Rust (stable) via rustup; Xcode Command Line Tools |
-| Go development (optional) | Go 1.22, or run Go in the `golang:1.22-alpine` Docker image |
+| Gateway stack | Docker with Compose v2, GNU Make |
+| Context Guardian | macOS on Apple Silicon, Node.js 22, Rust (stable), Xcode Command Line Tools |
+| Go development (optional) | Go 1.26, or use the `golang:1.26` Docker image |
 
-Full instructions: [docs/INSTALLATION.md](docs/INSTALLATION.md) and
-[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
-
-### 1. Run the gateway stack
+### 1. Start the development stack
 
 ```sh
-cp .env.example .env    # optional; Compose defaults work without it
-make up                 # builds and starts all services (first run pulls an Ollama model)
+cp .env.example .env   # optional; the defaults work for local development
+make up
 ```
 
 | Service | URL |
 | --- | --- |
-| Portal over HTTPS (needs `127.0.0.1 suez.acrosystemsinc.ai` in `/etc/hosts`; see [docs/local-development.md](docs/local-development.md)) | `https://suez.acrosystemsinc.ai:5443` |
-| Portal (direct) | `http://localhost:5173` |
-| Gateway health | `http://localhost:8080/healthz` |
-| Control-plane health | `http://localhost:8081/healthz` |
-| OPA | `http://localhost:8181/v1/data/suez/authz/allow` |
-| Ollama | `http://localhost:11434/api/tags` |
+| Portal | http://localhost:5173 |
+| HTTPS edge | https://localhost:5443 (self-signed certificate; see [docs/local-development.md](docs/local-development.md)) |
+| Gateway | http://localhost:8080/healthz |
+| Control plane | http://localhost:8081/healthz |
 
-Stop the stack with `make down`. Note that `make clean` **deletes the database
+The development stack seeds a demo tenant and the well-known key
+`suez-demo-admin-key`. **It is for your machine only;** production mode
+refuses to start with these settings.
+
+Try a governed chat call using the free stub model:
+
+```sh
+curl -s http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer suez-demo-admin-key" \
+  -H "Content-Type: application/json" \
+  -H "X-SUEZ-Session-Id: demo-1" \
+  -d '{"model":"demo-model","messages":[{"role":"user","content":"Hello"}]}' -i
+```
+
+The response carries `X-SUEZ-Trace-Id` and `X-SUEZ-Context-Status`. Once the
+model has a context window configured, it also carries
+`X-SUEZ-Context-Percent`.
+
+Stop the stack with `make down`. `make clean` also **deletes the database
 volume**.
-
-A fresh database is seeded with **demo data and a demo API key**. These are
-for local use only. See [docs/operations.md](docs/operations.md) for portal
-workflows.
 
 ### 2. Run Context Guardian
 
@@ -257,224 +199,222 @@ npm ci
 npm run tauri dev
 ```
 
-It starts with the **Mock** source. To measure real requests:
-1. Apply migration `0006` to your database (see below).
-2. Set `models.context_window` for your models.
-3. Choose **SUEZ gateway** in Settings and store an API key.
-4. Send `X-SUEZ-Session-Id: <id>` with your chat requests.
+In **Settings**, choose **SUEZ gateway**, enter the gateway URL and save an API
+key (it goes to the Keychain). See
+[apps/context-guardian/README.md](apps/context-guardian/README.md).
 
-Step by step: [apps/context-guardian/README.md](apps/context-guardian/README.md#gateway-mode).
+To build an installer into the repository root (git-ignored):
 
-### Database migrations
+```sh
+make dmg   # → ./ContextGuardian.dmg
+```
 
-Migrations in `infra/db/migrations/` run automatically **only when the
-PostgreSQL volume is first created**. To add `0006_context_guardian.sql` to an
-existing database, apply it by hand (it is additive and idempotent); see
-[infra/db/README.md](infra/db/README.md). Back up first with
-`./scripts/backup-postgres.sh`.
+## Sharing a staging environment with testers
 
-## Configuration
+`scripts/staging.sh` runs a staging copy of SUEZ on one machine in
+**production mode** and publishes it through a temporary Cloudflare tunnel.
+No demo credentials exist there. Each tester gets an isolated tenant and
+expiring keys.
 
-All configuration uses environment variables with safe local defaults. Copy
-`.env.example` to `.env` (git-ignored) to override them. Provider API keys can
-be supplied as environment variables or as files in `infra/secrets/`.
-Context Guardian keeps its settings in its own app-data directory and its API
-key in the Keychain.
+```sh
+bash scripts/staging.sh up              # start; prints the public URL
+bash scripts/staging.sh add-tester alice
+bash scripts/staging.sh list
+bash scripts/staging.sh revoke alice
+bash scripts/staging.sh down            # stop and keep data (destroy removes it)
+```
 
-The full reference is in [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+Each tester gets `~/.suez-staging/testers/<name>.txt` (URLs, keys and steps)
+and `ContextGuardian.dmg`. The tunnel URL changes on every restart. The tester
+guide is [docs/TESTING-STAGING.md](docs/TESTING-STAGING.md).
+
+## Deploying to production
+
+Production uses `infra/compose/docker-compose.prod.yml`. Only the Caddy edge
+is published, TLS comes from ACME, and every secret is read from a file.
+In short:
+
+1. Copy `.env.production.example` and fill it in:
+   - identity provider issuer and audience;
+   - CORS origins;
+   - trusted proxies;
+   - secret file paths.
+2. Run migrations with `scripts/migrate.sh`, which uses an advisory lock and
+   records each migration it applies.
+3. Create the first tenant and key with
+   `control-plane bootstrap --tenant-slug … --tenant-name …`.
+4. Work through
+   [docs/production/GO-LIVE-CHECKLIST.md](docs/production/GO-LIVE-CHECKLIST.md).
+
+The full guide is [docs/production/DEPLOYMENT.md](docs/production/DEPLOYMENT.md).
+Runbooks cover rollback, incident response, key rotation, backup and restore,
+and data retention.
+
+## API overview
+
+All gateway routes need `Authorization: Bearer <api-key or JWT>` (or
+`X-API-Key`).
+
+**Gateway** (`/gateway` behind the edge):
+
+| Method and path | Permission | Purpose |
+| --- | --- | --- |
+| `POST /v1/chat/completions` | `gateway.invoke` | Governed chat completion; `stream: true` supported |
+| `POST /v1/tools/execute` | `gateway.tools` | Governed tool call |
+| `GET /v1/context/usage?session=<id>` | `usage.read` | Latest context usage for the caller's session |
+| `GET /v1/identity` | `session.read` | Who am I (tenant, actor, scopes) |
+| `GET /v1/observability` | `usage.read` | Usage summary for the tenant |
+| `/v1/memory/*` | `memory.*` | SUEZ Memory, proxied to the control plane |
+
+**Control plane** (`/control-plane` behind the edge), under `/api/v1`:
+
+| Area | Routes |
+| --- | --- |
+| Session | `GET auth/session` |
+| Tenants | `GET, POST tenants` (platform admin) |
+| Keys and users | `api-keys`, `users` (`apikeys.manage`, `users.manage`) |
+| Access | `access-requests`, `access-requests/{id}/approve or deny`, `access-grants` |
+| Catalog | `models`, `tools` |
+| Policies | `policies`, `generate`, `{id}/validate`, `{id}/tests`, `{id}/tests/run`, `{id}/publish`, `{id}/rollback`, `{id}/versions` |
+| Audit | `audit-log`, `audit-log/traces/{traceId}` |
+| Memory | `memory/sessions`, `…/checkpoints`, `memory/continuations`, `memory/settings`, `memory/context-policies`, `memory/retrievals`, export, delete and retention |
+
+Scopes bundle permissions: `read-only`, `gateway-inference`, `policy-admin`,
+`audit-reader`, `tenant-admin` and `platform-admin`. The full reference is
+[docs/API.md](docs/API.md).
+
+## Security model
+
+- **Production by default.** `SUEZ_ENV` defaults to `production` and the
+  services refuse to start with unsafe settings:
+  - demo credentials;
+  - `dev-hs256` JWTs;
+  - `*` CORS;
+  - a missing internal token or data key.
+- **Authentication:**
+  - JWTs need an asymmetric algorithm and must pass issuer, audience and time
+    checks.
+  - API keys are random, stored only as SHA-256 hashes, expirable, revocable
+    and attributable to whoever created them.
+- **Authorization:** each route maps to exactly one permission, and a route
+  missing from the table is refused. Keys cannot grant more than their
+  creator holds.
+- **Tenant isolation:**
+  - Every query is tenant-scoped.
+  - Each tenant's OPA policies load into their own package, and policy drafts
+    run in a sandbox.
+  - Policy changes across replicas are serialized by a PostgreSQL advisory
+    lock.
+- **Secrets:**
+  - Secrets are redacted from responses, logs, audit records, cache keys and
+    memory.
+  - Memory content is encrypted at rest.
+  - The edge blocks `/internal*` and `/opa*`.
+
+Read [docs/production/THREAT-MODEL.md](docs/production/THREAT-MODEL.md).
+Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
 ## Testing
 
-| Suite | Command | Needs |
+| Suite | Command | Result on this branch |
 | --- | --- | --- |
-| Context Guardian type check | `npm run typecheck` (in `apps/context-guardian`) | Node |
-| Context Guardian unit tests (Vitest) | `npm test` | Node |
-| Context Guardian Rust tests | `npm run build && npm run test:rust` | Rust, built frontend |
-| Native smoke test, mock | `npm run smoke` | macOS desktop session, debug build |
-| Native smoke test, project memory | `npm run smoke:memory` | macOS desktop session, debug build |
-| Native smoke test, gateway | `npm run smoke:gateway` | Docker; starts a throwaway `cg-test-*` stack and uses only the free stub model |
-| Go vet and unit tests | `go vet ./... && go test ./...` (in `apps/gateway`, `apps/control-plane`) | Go 1.22 or Docker |
-| Gateway integration test | `go test -tags integration ./...` with `DATABASE_URL` and `REDIS_URL` | Throwaway PostgreSQL and Redis with all migrations |
-| Portal UI build | `npm ci && npm run build` (in `apps/portal-ui`) | Node |
+| Control plane, Go unit tests | `go test ./...` in `apps/control-plane` | 24 pass |
+| Gateway, Go unit tests | `go test ./...` in `apps/gateway` | 25 pass |
+| Known vulnerabilities | `govulncheck ./...` (both services) | none found |
+| OPA policies | `opa test infra/opa/policies` | 8/8 pass |
+| End-to-end (full stack, mock IdP and provider) | `sh scripts/e2e.sh -v` | 11/11 groups pass |
+| Context Guardian (TypeScript) | `npm test` in `apps/context-guardian` | 106 pass |
+| Context Guardian (Rust) | `npm run test:rust` | 45 pass |
+| Portal | `npm run build` in `apps/portal-ui` | builds |
+| npm audit (production dependencies) | `npm audit --omit=dev` | 0 vulnerabilities |
 
-CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the type
-checks, Vitest, Rust tests, Go vet and unit tests, and the portal build. No
-test makes paid provider calls. Details, including what each suite covers and
-what it does not: [docs/TESTING.md](docs/TESTING.md).
+No test calls a paid provider. Go does not need to be installed: see
+[docs/TESTING.md](docs/TESTING.md) for the Docker commands. CI
+([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs all of these
+except the native desktop smoke tests. Exact commands and outputs are in
+[docs/production/VERIFICATION.md](docs/production/VERIFICATION.md).
 
-## Building the desktop app
+## Repository layout
 
-```sh
-cd apps/context-guardian
-npm ci
-npm run tauri build
+```text
+apps/
+  gateway/            Go gateway service
+  control-plane/      Go control plane (identity, policy, audit, SUEZ Memory)
+  portal-ui/          React admin and requester portal
+  context-guardian/   Tauri desktop app (React UI in src/, Rust core in src-tauri/)
+infra/
+  compose/            docker-compose.yml (dev), .prod.yml, .staging.yml, .e2e.yml
+  db/                 numbered SQL migrations and development seeds
+  opa/                OPA image and Rego policies with tests
+  tls/                Caddyfiles for dev, staging and production
+  policy-llm/         Ollama image for policy drafting
+  secrets/            file-backed secrets (contents git-ignored)
+scripts/              migrate, e2e, staging, build-dmg, backup/restore, demos
+tests/e2e/            full-stack acceptance tests
+docs/                 guides, production runbooks, ADRs, design documents
+.github/              CI, issue and pull request templates, Dependabot
 ```
 
-Output:
-- `src-tauri/target/release/bundle/macos/SUEZ Context Guardian.app`
-- `src-tauri/target/release/bundle/dmg/SUEZ Context Guardian_<version>_aarch64.dmg`
+## Technology stack
 
-Builds are ad-hoc signed and **not notarized**. No public binary release
-exists. See [docs/RELEASE.md](docs/RELEASE.md).
-
-## Security and privacy
-
-- **Local data stays local.** Checkpoints, project memory, revisions and
-  settings are plain JSON files in the app-data directory. They are never
-  uploaded.
-- **What goes to the gateway:** the session id and the API key header. **What
-  comes back:** token counts, percentage, model name, measurement source and
-  status.
-- **Secrets:**
-  - The desktop API key lives only in the OS credential store and in Rust
-    memory.
-  - Rust refuses to save a checkpoint or memory record, or copy a prompt, that
-    contains it.
-  - Provider keys for the gateway come from `.env` or `infra/secrets/`, both
-    git-ignored.
-- **Local-only runtime.** The gateway stack is not hardened:
-  - JWT signatures are not verified;
-  - a demo API key is seeded;
-  - the default database password is `suez`;
-  - CORS is `*`;
-  - ports are published on all interfaces.
-
-  Do not expose it to untrusted networks.
-
-Details: [docs/SECURITY-AND-PRIVACY.md](docs/SECURITY-AND-PRIVACY.md) and
-[docs/DATA-RETENTION.md](docs/DATA-RETENTION.md). To report a vulnerability,
-follow [SECURITY.md](SECURITY.md).
-
-## Context Guardian in depth
-
-### Checkpoint lifecycle
-
-1. **Monitor.** A usage reading arrives from Mock or the gateway.
-2. **Detect.** At 85% (configurable), one **draft** is saved immediately and the
-   editor opens. It re-arms only after usage drops 5 points below the threshold.
-3. **Draft.** The draft is pre-filled from the project's memory and the newest
-   checkpoint of the same project. Carried "verified" items become "reported".
-4. **Edit and save.** Changes are autosaved. Writes are atomic and read back to
-   verify them; a version-1 file is backed up before it is upgraded.
-5. **Finalize.** Mark the checkpoint final. It appears in history (filterable by
-   project).
-6. **Continue.** Copy the continuation prompt and paste it into a new session.
-7. **Remember (optional, explicit).** Propose a project-memory update from a
-   final checkpoint, review the preview, and approve it.
-
-Diagram: [checkpoint-lifecycle.mmd](docs/architecture/checkpoint-lifecycle.mmd).
-
-### Context-usage measurement limitations
-
-- **Only conversations routed through the SUEZ gateway** with
-  `X-SUEZ-Session-Id` can be measured. Direct sessions in Claude.ai, Claude
-  Code, ChatGPT/Codex, Cursor or any other client are **not** visible. Owning
-  a provider API key does not give access to them.
-- A percentage needs `models.context_window`. Without it, token counts are
-  shown with no percentage.
-- Each reading is labelled with its source:
-
-  | Label | Meaning |
-  | --- | --- |
-  | `provider_reported` | Usage returned by the provider |
-  | `gateway_estimate` | Stub model, about characters ÷ 4 |
-  | `unavailable` | No usage returned |
-  | `MOCK DATA` | Simulated |
-  | `STALE` | No successful poll within 3 × the poll interval |
-
-  Stale and unavailable readings never trigger checkpoints.
-- Provider-reported counts are implemented but **have not been verified
-  against a live paid provider**.
-
-### Persistent project memory
-
-Implemented in this repository:
-- Stable project ids. Names never trigger a merge.
-- Import from a checkpoint, and merges from final checkpoints, each with a
-  preview and explicit approval.
-- Approval records, which never execute anything.
-- Revision checks, a no-removal rule, the latest 50 revisions kept, restore,
-  and quarantine of corrupt files.
-
-Memory is **local to one machine** and is not synchronised. See
-[apps/context-guardian/README.md](apps/context-guardian/README.md#project-memory).
-
-### Local storage
-
-| OS | App-data directory |
+| Layer | Technology |
 | --- | --- |
-| macOS | `~/Library/Application Support/ai.acrosystems.suez.contextguardian/` |
-| Windows (untested) | `%APPDATA%\ai.acrosystems.suez.contextguardian\` |
-| Linux (untested) | `~/.local/share/ai.acrosystems.suez.contextguardian/` |
+| Services | Go 1.26 (`net/http`, `pgx` v5, `go-redis` v9, `golang-jwt` v5) |
+| Policy | Open Policy Agent 1.4 (Rego); Ollama for policy drafting |
+| Data | PostgreSQL 16, Redis 7 |
+| Edge | Caddy 2 |
+| Portal | React 18, TypeScript, Vite |
+| Desktop | Tauri 2 (Rust), React 18, TypeScript, Vitest |
+| Delivery | Docker Compose, GitHub Actions, non-root container images |
 
-Override it with `CONTEXT_GUARDIAN_DATA_DIR`.
+## Known limitations
 
-## Known issues and limitations
+These are summarised here; the full, verified list is in
+[docs/production/LIMITATIONS.md](docs/production/LIMITATIONS.md).
 
-- Context measurement is limited to gateway-routed requests (see above).
-- Provider-reported counts are untested against live paid providers.
-- Context Guardian:
-  - is built and tested only on macOS (Apple Silicon);
-  - is ad-hoc signed and not notarized, so macOS may ask again for Keychain
-    access after a rebuild;
-  - window dragging is verified by hand only.
-- If the Keychain cannot be read, the secret guard cannot compare and allows
-  the save, so that drafts are never lost.
-- Backups of upgraded v1 checkpoints are restored by copying the file back by
-  hand; there is no UI for it.
-- Gateway stack:
-  - local-development security only (see above);
-  - no automated tests for most gateway and control-plane features;
-  - four Go files are not `gofmt`-clean;
-  - `context_usage_measurements` has no retention policy;
-  - `context_window` can be set only with SQL.
-- Migration `0006` is not applied automatically to existing databases.
-- `docs/` contains design documents (PDF/DOCX/Markdown) describing planned
-  enterprise features. They are not descriptions of implemented behaviour.
+- **Encryption keys:** only a local key provider exists; there is no cloud KMS
+  integration yet.
+- **Provider and load testing:**
+  - Provider calls were verified against a protocol-faithful mock, not a paid
+    provider.
+  - Multi-replica policy coordination has not been load-tested.
+- **Context measurement** covers only traffic sent through the SUEZ gateway.
+  Context Guardian cannot see sessions in Claude.ai, ChatGPT, Cursor or other
+  clients.
+- **Checkpoint drafts** copy and cite stored records; they are not
+  LLM-generated summaries.
+- **Context Guardian:**
+  - It is built and tested on macOS (Apple Silicon) only.
+  - The `.dmg` is ad-hoc signed and not notarized, so testers right-click →
+    **Open** the first time.
+- **No tagged release yet.**
 
-## Roadmap
+## Documentation
 
-See [docs/ROADMAP.md](docs/ROADMAP.md), which separates implemented,
-in-progress, planned and blocked work.
+| Document | Purpose |
+| --- | --- |
+| [docs/production/](docs/production/README.md) | Threat model, deployment, configuration, runbooks, go-live checklist, verification |
+| [docs/API.md](docs/API.md) | HTTP API reference and permissions |
+| [docs/adr/](docs/adr/) | Architecture decision records |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Components and Context Guardian architecture |
+| [docs/INSTALLATION.md](docs/INSTALLATION.md) | Installing and building |
+| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Day-to-day development |
+| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Development configuration |
+| [docs/TESTING.md](docs/TESTING.md) | Test suites and what they cover |
+| [docs/TESTING-STAGING.md](docs/TESTING-STAGING.md) | Guide for staging testers |
+| [docs/SECURITY-AND-PRIVACY.md](docs/SECURITY-AND-PRIVACY.md) | Credentials and data boundaries |
+| [docs/THIRD-PARTY-AND-TOOLING.md](docs/THIRD-PARTY-AND-TOOLING.md) | Claude-Mem and REA boundaries |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common problems |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | What is planned next |
+| [CHANGELOG.md](CHANGELOG.md) | Notable changes |
+| [docs/saas/](docs/saas/) and `docs/*.pdf` | Enterprise SaaS design material (planned, not implemented) |
 
 ## Contributing
 
-Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup,
-tests, coding standards and secret-handling rules, and follow the
-[Code of Conduct](CODE_OF_CONDUCT.md).
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request, and
+follow the [Code of Conduct](CODE_OF_CONDUCT.md). For help, see
+[SUPPORT.md](SUPPORT.md).
 
 ## License
 
 [MIT](LICENSE) © 2026 Shushruth_Bharadwaj.
-
-## Support
-
-Open a [GitHub issue](https://github.com/shushruth21/SUEZ-AI/issues) with
-reproduction steps. Never include API keys, `.env` contents, checkpoint files
-or project memory. See [SUPPORT.md](SUPPORT.md). Report security issues
-privately as described in [SECURITY.md](SECURITY.md).
-
-## Documentation index
-
-| Document | Purpose |
-| --- | --- |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System architecture, flows, data ownership |
-| [docs/gateway-architecture.md](docs/gateway-architecture.md) | Gateway and control-plane flows, data model, APIs |
-| [docs/INSTALLATION.md](docs/INSTALLATION.md) | Installing and building |
-| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Day-to-day development |
-| [docs/local-development.md](docs/local-development.md) | Compose stack, HTTPS edge, backups |
-| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Environment variables and settings |
-| [docs/TESTING.md](docs/TESTING.md) | Test suites, coverage and gaps |
-| [docs/SECURITY-AND-PRIVACY.md](docs/SECURITY-AND-PRIVACY.md) | Credentials, data boundaries, security limitations |
-| [docs/DATA-RETENTION.md](docs/DATA-RETENTION.md) | What is stored, where, and for how long |
-| [docs/RELEASE.md](docs/RELEASE.md) | Release preparation and limitations |
-| [docs/ROADMAP.md](docs/ROADMAP.md) | Status of planned work |
-| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common problems |
-| [docs/operations.md](docs/operations.md) | Portal guide for admins and requesters |
-| [docs/implementation.md](docs/implementation.md) | Notes on portal and demo implementation |
-| [docs/local-architecture.md](docs/local-architecture.md) | Short local-runtime overview |
-| [apps/context-guardian/README.md](apps/context-guardian/README.md) | Context Guardian reference |
-| [scripts/README-demo.md](scripts/README-demo.md) | Demo scripts |
-| [docs/saas/](docs/saas/) | Enterprise SaaS design (planned) |
-| [docs/suez-enterprise-product-must-haves.md](docs/suez-enterprise-product-must-haves.md) | Enterprise requirements (planned) |
-| `docs/*.pdf`, `docs/*/*.pdf`, `docs/*.docx` | Product and architecture design documents (planning material) |
