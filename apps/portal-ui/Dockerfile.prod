@@ -1,6 +1,6 @@
 # Production image: a static build served by Caddy. The development image
 # (Dockerfile) runs the Vite dev server and must not be deployed.
-FROM node:20-alpine AS build
+FROM node:26-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
