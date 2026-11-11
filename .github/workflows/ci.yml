@@ -72,7 +72,7 @@ jobs:
         working-directory: apps/${{ matrix.service }}
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           # Reads the toolchain line in go.mod, so a security patch is one edit.
           go-version-file: apps/${{ matrix.service }}/go.mod
