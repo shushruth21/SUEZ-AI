@@ -10,6 +10,11 @@ updates:
     schedule: { interval: weekly }
     groups:
       npm-minor: { update-types: [minor, patch] }
+    # Major upgrades (TypeScript 7, React 19, ...) need code changes and are
+    # done deliberately in their own branch, not as automatic PRs.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: cargo
     directory: /apps/context-guardian/src-tauri
     schedule: { interval: weekly }

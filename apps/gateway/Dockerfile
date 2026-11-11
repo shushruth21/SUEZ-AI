@@ -1,4 +1,4 @@
-FROM golang:1.26-alpine AS build
+FROM golang:1.26.11-alpine AS build
 
 WORKDIR /app
 COPY go.mod go.sum ./
@@ -6,7 +6,7 @@ RUN go mod download
 COPY cmd ./cmd
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /gateway ./cmd/server
 
-FROM alpine:3.20
+FROM alpine:3.24
 
 # wget is used by the container health check only.
 RUN apk add --no-cache wget ca-certificates && adduser -D -H -u 10001 suez
