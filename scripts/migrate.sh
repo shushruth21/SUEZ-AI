@@ -13,6 +13,18 @@ SEEDS_DIR="${2:-}"
 
 run() { psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q "$@"; }
 
+# A fresh PostgreSQL can report ready on its local socket while it is still
+# initialising; wait (up to 60 s) until it accepts this connection.
+attempt=0
+until psql "$DATABASE_URL" -qtAc 'select 1' >/dev/null 2>&1; do
+  attempt=$((attempt + 1))
+  if [ "$attempt" -ge 30 ]; then
+    echo "database is not accepting connections" >&2
+    exit 1
+  fi
+  sleep 2
+done
+
 run -c "create table if not exists schema_migrations (
   name text primary key, kind text not null default 'migration', applied_at timestamptz not null default now())"
 
