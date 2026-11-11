@@ -10,7 +10,7 @@ COPY src ./src
 ENV VITE_CONTROL_PLANE_URL=/control-plane VITE_GATEWAY_URL=/gateway
 RUN npm run build
 
-FROM caddy:2.8-alpine
+FROM caddy:2.11-alpine
 COPY --from=build /app/dist /srv
 RUN printf ':8080 {\n\troot * /srv\n\ttry_files {path} /index.html\n\tfile_server\n\theader /assets/* Cache-Control "public, max-age=31536000, immutable"\n}\n' > /etc/caddy/Caddyfile
 EXPOSE 8080
