@@ -25,7 +25,7 @@ jobs:
       run:
         working-directory: apps/context-guardian
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
@@ -42,7 +42,7 @@ jobs:
       run:
         working-directory: apps/context-guardian
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
@@ -71,7 +71,7 @@ jobs:
       run:
         working-directory: apps/${{ matrix.service }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with:
           # Reads the toolchain line in go.mod, so a security patch is one edit.
@@ -98,7 +98,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Run scripts/e2e.sh (fresh PostgreSQL, Redis, OPA, control plane, gateway)
         run: sh scripts/e2e.sh -v
 
@@ -106,7 +106,7 @@ jobs:
     name: Compose files — validate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: docker compose -f infra/compose/docker-compose.yml config -q
       - name: Production example refuses to render without required settings
         run: |
@@ -120,7 +120,7 @@ jobs:
     name: OPA — policy isolation tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Run Rego tests
         run: docker run --rm -v "$GITHUB_WORKSPACE/infra/opa/policies:/p:ro" openpolicyagent/opa:1.4.2 test /p -v
 
@@ -131,7 +131,7 @@ jobs:
       run:
         working-directory: apps/portal-ui
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: "20"
