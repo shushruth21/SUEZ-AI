@@ -24,17 +24,25 @@ checkpoints or project-memory files** — redact them.
 There is no formal response-time commitment; reports are handled on a
 best-effort basis by the maintainer.
 
-## Scope and known limitations
+## Scope
 
-The gateway stack in this repository is a **local-development runtime** and is
-known not to be production-hardened. The following are documented limitations,
-not new findings (see [docs/SECURITY-AND-PRIVACY.md](docs/SECURITY-AND-PRIVACY.md)):
+In scope:
 
-- JWT signatures are not verified by the control plane.
-- A demo API key and demo identities are seeded into fresh databases.
-- Default database credentials (`suez` / `suez`), `Access-Control-Allow-Origin: *`,
-  self-signed TLS and ports published on all interfaces.
+- The gateway, control plane, OPA policies, portal and Context Guardian in
+  this repository, run with **production settings** (`SUEZ_ENV=production`,
+  `infra/compose/docker-compose.prod.yml`).
+- Anything that lets one tenant read or change another tenant's data,
+  policies, memory or keys; lets an API key exceed its scopes; or exposes
+  secrets in responses, logs, audit records or memory.
 
-Reports that show these can be exploited in ways beyond what is documented, or
-any issue in SUEZ Context Guardian's handling of credentials and local data,
-are very welcome.
+Out of scope (documented, intentional behaviour):
+
+- The **development** stack (`infra/compose/docker-compose.yml`): demo API
+  key, `dev-hs256` JWTs, permissive CORS and default database credentials are
+  there on purpose and refused by production mode.
+- Limitations already listed in
+  [docs/production/LIMITATIONS.md](docs/production/LIMITATIONS.md), unless you
+  show impact beyond what is described there.
+
+The threat model is in
+[docs/production/THREAT-MODEL.md](docs/production/THREAT-MODEL.md).

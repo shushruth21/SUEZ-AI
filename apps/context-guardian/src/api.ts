@@ -37,6 +37,9 @@ export const api = {
     invoke<GatewayResult<GatewayContextUsage>>("gateway_fetch_usage", { baseUrl, sessionId }),
   gatewayTestConnection: (baseUrl: string) =>
     invoke<GatewayResult<GatewayIdentity>>("gateway_test_connection", { baseUrl }),
+  // Governed SUEZ Memory API; Rust confines the path to /v1/memory/.
+  gatewayMemoryRequest: (baseUrl: string, method: "GET" | "POST" | "PATCH", path: string, body?: unknown) =>
+    invoke<GatewayResult<unknown>>("gateway_memory_request", { baseUrl, method, path, body: body ?? null }),
   smokePhase: () => invoke<string | null>("smoke_mode"),
   smokeSignal: (name: string) => invoke<void>("smoke_signal", { name }),
   smokeReport: (report: unknown) => invoke<void>("smoke_report", { report })

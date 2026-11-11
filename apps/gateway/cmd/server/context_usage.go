@@ -142,7 +142,11 @@ type contextUsageResponse struct {
 	Measurement   *contextUsageMeasurementJSON `json:"measurement"`
 	ContextWindow *int                         `json:"contextWindow"`
 	Percent       *float64                     `json:"percent"`
-	RetrievedAt   string                       `json:"retrievedAt"`
+	// ContextStatus is ok, notice, checkpoint, warning or limit, judged
+	// against the tenant's thresholds for the model.
+	ContextStatus string             `json:"contextStatus,omitempty"`
+	Thresholds    *contextThresholds `json:"thresholds,omitempty"`
+	RetrievedAt   string             `json:"retrievedAt"`
 }
 
 // Status values returned by GET /v1/context/usage.
@@ -217,6 +221,9 @@ func (a *gatewayApp) handleContextUsage(w http.ResponseWriter, r *http.Request) 
 
 	percent := math.Round(float64(*latest.TotalTokens)/float64(*window)*100*100) / 100
 	response.Percent = &percent
+	thresholds := a.loadContextThresholds(r.Context(), identity.TenantID, latest.Model)
+	response.Thresholds = &thresholds
+	response.ContextStatus = thresholds.classify(percent)
 	response.Status = usageStatusOK
 	switch {
 	case latest.Source == measurementGatewayEstimate:

@@ -1,0 +1,11 @@
+# Reviews are requested from these owners automatically.
+*                                   @shushruth21
+
+# Security-sensitive areas: changes here need an owner's review.
+/apps/control-plane/cmd/server/authz.go     @shushruth21
+/apps/control-plane/cmd/server/auth_jwt.go  @shushruth21
+/apps/control-plane/cmd/server/crypto.go    @shushruth21
+/infra/opa/                                 @shushruth21
+/infra/db/migrations/                       @shushruth21
+/infra/compose/docker-compose.prod.yml      @shushruth21
+/.github/workflows/                         @shushruth21

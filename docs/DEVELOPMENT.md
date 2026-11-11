@@ -65,7 +65,7 @@ go run ./cmd/server    # needs DATABASE_URL, REDIS_URL etc. (see CONFIGURATION.m
 Without Go, use Docker:
 
 ```sh
-docker run --rm -v "$PWD/apps/gateway":/src -w /src golang:1.22-alpine \
+docker run --rm -v "$PWD/apps/gateway":/src -w /src golang:1.26-alpine \
   sh -c 'go vet ./... && go test ./...'
 ```
 

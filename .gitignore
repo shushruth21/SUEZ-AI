@@ -98,3 +98,6 @@ service-account*.json
 *.swo
 *~
 Thumbs.db
+!.env.production.example
+!.env.staging.example
+ContextGuardian.dmg

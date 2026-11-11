@@ -1,3 +1,5 @@
+> Retention controls, deletion endpoints and defaults for the gateway stack are in [production/DATA-RETENTION-DELETION.md](production/DATA-RETENTION-DELETION.md).
+
 # Data Retention
 
 This page describes **current behaviour**. Nothing here is a policy commitment;

@@ -53,8 +53,8 @@ func (f *fakeUsageStore) ContextWindow(_ context.Context, _ string, model string
 }
 
 var (
-	aliceIdentity = identityContext{TenantID: "tenant-1", Actor: "alice", Roles: []string{"user"}}
-	bobIdentity   = identityContext{TenantID: "tenant-1", Actor: "bob", Roles: []string{"user"}}
+	aliceIdentity = identityContext{TenantID: "tenant-1", Actor: "alice", Roles: []string{"user"}, Permissions: gatewayPermissions}
+	bobIdentity   = identityContext{TenantID: "tenant-1", Actor: "bob", Roles: []string{"user"}, Permissions: gatewayPermissions}
 	stubModel     = modelRuntime{ExternalName: "demo-model", Provider: "stub"}
 	groqModel     = modelRuntime{ExternalName: "groq-llama", Provider: "groq"}
 	t0            = time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
@@ -219,7 +219,7 @@ func TestContextUsageEndpoint(t *testing.T) {
 		if code != http.StatusOK || body.Status != usageStatusNoMeasurement || body.Measurement != nil {
 			t.Fatalf("bob must not see alice's session, got %+v", body)
 		}
-		otherTenant := identityContext{TenantID: "tenant-2", Actor: "alice"}
+		otherTenant := identityContext{TenantID: "tenant-2", Actor: "alice", Permissions: gatewayPermissions}
 		_, body, _ = usageRequest(t, app, otherTenant, "?session=s1")
 		if body.Status != usageStatusNoMeasurement {
 			t.Fatalf("same actor name in another tenant must not see the session, got %+v", body)
@@ -285,7 +285,7 @@ func TestContextUsageEndpoint(t *testing.T) {
 		req = req.WithContext(context.WithValue(req.Context(), identityContextKey, aliceIdentity))
 		rec := httptest.NewRecorder()
 		app.handleProtected(rec, req)
-		if rec.Code != http.StatusNotFound {
+		if rec.Code != http.StatusMethodNotAllowed {
 			t.Fatalf("POST should not be routed, got %d", rec.Code)
 		}
 	})
@@ -308,7 +308,7 @@ func TestContextUsageRequiresAuthentication(t *testing.T) {
 	store := &fakeUsageStore{windows: map[string]int{"groq-llama": 1000}}
 	store.measurements = append(store.measurements, measurementFor(aliceIdentity, groqModel, "s1", "t", cacheStatusMiss, usageSummary{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15}, t0))
 	app := &gatewayApp{usageStore: store}
-	handler := withIdentityResolver(http.HandlerFunc(app.handleProtected))
+	handler := app.withIdentityResolver(http.HandlerFunc(app.handleProtected))
 
 	call := func(key string) (int, string) {
 		req := httptest.NewRequest(http.MethodGet, "/v1/context/usage?session=s1", nil)

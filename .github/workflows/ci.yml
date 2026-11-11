@@ -1,7 +1,8 @@
 # Checks that run reliably on GitHub-hosted runners without credentials.
-# No secrets, no deployments, no database migrations, no paid provider calls.
-# Native smoke tests and the gateway integration test need a desktop session or
-# a throwaway Docker stack and are run locally (see docs/TESTING.md).
+# No secrets, no deployments, no paid provider calls. The e2e job builds the
+# services and runs them against a fresh throwaway stack with a mock identity
+# provider and a mock OpenAI-compatible provider. Native desktop smoke tests
+# need a desktop session and are run locally (see docs/TESTING.md).
 name: CI
 
 on:
@@ -54,6 +55,8 @@ jobs:
       # tauri::generate_context! embeds ../dist, so the frontend must be built first.
       - run: npm ci
       - run: npm run build
+      - name: npm audit (production dependencies, high and above)
+        run: npm audit --omit=dev --audit-level=high
       # Ignored tests (real Keychain, real checkpoint file) are not run in CI.
       - run: cargo test --manifest-path src-tauri/Cargo.toml
 
@@ -71,12 +74,53 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.26"
           cache-dependency-path: apps/${{ matrix.service }}/go.sum
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"; echo "$unformatted"; exit 1
+          fi
       - run: go vet ./...
+      # Compile (but do not run) the integration test so it cannot rot.
+      - run: go vet -tags integration ./...
       # Unit tests only; the integration test (build tag "integration") needs
       # PostgreSQL and Redis and is skipped here.
       - run: go test -count=1 ./...
+      - name: govulncheck (known vulnerabilities in reachable code)
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  e2e:
+    name: End-to-end — full stack acceptance tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run scripts/e2e.sh (fresh PostgreSQL, Redis, OPA, control plane, gateway)
+        run: sh scripts/e2e.sh -v
+
+  compose:
+    name: Compose files — validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose -f infra/compose/docker-compose.yml config -q
+      - name: Production example refuses to render without required settings
+        run: |
+          if docker compose -f infra/compose/docker-compose.prod.yml config -q 2>/dev/null; then
+            echo "production compose rendered without its required secrets"; exit 1
+          fi
+      - name: Production edge configuration
+        run: docker run --rm -e EDGE_HOST=suez.example.com -e ACME_EMAIL=ops@example.com -v "$PWD/infra/tls/Caddyfile.prod:/etc/caddy/Caddyfile:ro" caddy:2.8-alpine caddy validate --config /etc/caddy/Caddyfile
+
+  opa:
+    name: OPA — policy isolation tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Rego tests
+        run: docker run --rm -v "$GITHUB_WORKSPACE/infra/opa/policies:/p:ro" openpolicyagent/opa:1.4.2 test /p -v
 
   portal-ui:
     name: Portal UI — typecheck and build
@@ -93,3 +137,5 @@ jobs:
           cache-dependency-path: apps/portal-ui/package-lock.json
       - run: npm ci
       - run: npm run build
+      - name: npm audit (production dependencies, high and above)
+        run: npm audit --omit=dev --audit-level=high

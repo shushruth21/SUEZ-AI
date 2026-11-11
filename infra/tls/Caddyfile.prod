@@ -1,0 +1,65 @@
+# Production edge. The only component reachable from outside.
+{
+	email {$ACME_EMAIL}
+	admin off
+	servers {
+		timeouts {
+			read_header 10s
+			read_body 30s
+			idle 2m
+		}
+		# Take the client address from this proxy only; upstream services trust
+		# X-Forwarded-For from TRUSTED_PROXY_CIDRS.
+		trusted_proxies static private_ranges
+	}
+}
+
+{$EDGE_HOST} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Permissions-Policy "geolocation=(), microphone=(), camera=()"
+		-Server
+	}
+
+	# Larger bodies are refused here before they reach a service. The services
+	# apply their own limits as well (MAX_REQUEST_BODY_BYTES).
+	request_body {
+		max_size 8MB
+	}
+
+	# Service-to-service endpoints are never reachable through the edge.
+	@internal path /control-plane/internal* /gateway/internal* /internal*
+	handle @internal {
+		respond 404
+	}
+
+	# OPA and any model runtime have no authentication and are not routed.
+	@unrouted path /opa* /policy-llm*
+	handle @unrouted {
+		respond 404
+	}
+
+	handle_path /control-plane/* {
+		reverse_proxy control-plane:8081 {
+			health_uri /healthz
+		}
+	}
+
+	handle_path /gateway/* {
+		reverse_proxy gateway:8080 {
+			health_uri /healthz
+			# Streamed chat responses must not be buffered.
+			flush_interval -1
+		}
+	}
+
+	handle {
+		header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+		reverse_proxy portal:8080
+	}
+}

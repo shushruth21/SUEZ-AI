@@ -1,0 +1,55 @@
+# Staging edge for a single Mac behind a Cloudflare quick tunnel. Cloudflare
+# terminates TLS, so this listens on plain HTTP inside the Docker network.
+# Routes and blocks match Caddyfile.prod.
+{
+	admin off
+	auto_https off
+	servers {
+		timeouts {
+			read_header 10s
+			read_body 30s
+			idle 2m
+		}
+		trusted_proxies static private_ranges
+	}
+}
+
+:8080 {
+	encode zstd gzip
+
+	header {
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	request_body {
+		max_size 8MB
+	}
+
+	@internal path /control-plane/internal* /gateway/internal* /internal*
+	handle @internal {
+		respond 404
+	}
+
+	@unrouted path /opa* /policy-llm*
+	handle @unrouted {
+		respond 404
+	}
+
+	handle_path /control-plane/* {
+		reverse_proxy control-plane:8081
+	}
+
+	handle_path /gateway/* {
+		reverse_proxy gateway:8080 {
+			flush_interval -1
+		}
+	}
+
+	handle {
+		header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+		reverse_proxy portal:8080
+	}
+}

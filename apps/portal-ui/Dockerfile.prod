@@ -1,0 +1,16 @@
+# Production image: a static build served by Caddy. The development image
+# (Dockerfile) runs the Vite dev server and must not be deployed.
+FROM node:20-alpine AS build
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY tsconfig.json tsconfig.app.json tsconfig.node.json vite.config.ts index.html ./
+COPY src ./src
+# Same-origin API paths; the edge routes them.
+ENV VITE_CONTROL_PLANE_URL=/control-plane VITE_GATEWAY_URL=/gateway
+RUN npm run build
+
+FROM caddy:2.8-alpine
+COPY --from=build /app/dist /srv
+RUN printf ':8080 {\n\troot * /srv\n\ttry_files {path} /index.html\n\tfile_server\n\theader /assets/* Cache-Control "public, max-age=31536000, immutable"\n}\n' > /etc/caddy/Caddyfile
+EXPOSE 8080

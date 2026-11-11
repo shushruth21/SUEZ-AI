@@ -50,8 +50,8 @@ func TestIntegrationContextUsage(t *testing.T) {
 	t.Setenv("OPA_DECISION_URL", opa.URL)
 
 	identities := map[string]identityContext{
-		"admin-key": {TenantID: demoTenantID, TenantSlug: "demo", Actor: "Bootstrap Admin Key", Roles: []string{"admin"}},
-		"other-key": {TenantID: demoTenantID, TenantSlug: "demo", Actor: "someone-else@example.com", Roles: []string{"user"}},
+		"admin-key": {TenantID: demoTenantID, TenantSlug: "demo", Actor: "Bootstrap Admin Key", Roles: []string{"admin"}, Permissions: gatewayPermissions},
+		"other-key": {TenantID: demoTenantID, TenantSlug: "demo", Actor: "someone-else@example.com", Roles: []string{"user"}, Permissions: gatewayPermissions},
 	}
 	resolver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		identity, ok := identities[r.Header.Get("X-API-Key")]
@@ -65,7 +65,7 @@ func TestIntegrationContextUsage(t *testing.T) {
 	t.Setenv("AUTH_RESOLVER_URL", resolver.URL)
 
 	app := &gatewayApp{db: db, redis: redisClient, httpClient: &http.Client{Timeout: 10 * time.Second}, usageStore: &postgresUsageStore{db: db}}
-	handler := withIdentityResolver(http.HandlerFunc(app.handleProtected))
+	handler := app.withIdentityResolver(http.HandlerFunc(app.handleProtected))
 
 	setWindow := func(window any) {
 		if _, err := db.ExecContext(ctx, `update models set context_window = $1 where tenant_id = $2 and external_name = 'demo-model'`, window, demoTenantID); err != nil {

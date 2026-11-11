@@ -13,7 +13,8 @@ import {
   PolicyTestCase,
   PolicyTestRun,
   Tenant,
-  ToolRecord
+  ToolRecord,
+  apiKeyScopes
 } from "../types";
 
 type AdminViewProps = {
@@ -37,6 +38,9 @@ type AdminViewProps = {
   generatedKey: string;
   decisionReason: string;
   apiKeyLabel: string;
+  apiKeyScope: string;
+  onApiKeyScopeChange: (value: string) => void;
+  onRevokeApiKey: (apiKeyId: string) => void | Promise<void>;
   tenantForm: { name: string; slug: string; environment: string };
   modelForm: {
     externalName: string;
@@ -136,6 +140,9 @@ export function AdminView(props: AdminViewProps) {
     generatedKey,
     decisionReason,
     apiKeyLabel,
+    apiKeyScope,
+    onApiKeyScopeChange,
+    onRevokeApiKey,
     tenantForm,
     modelForm,
     toolForm,
@@ -1207,6 +1214,20 @@ export function AdminView(props: AdminViewProps) {
                       placeholder="My key"
                     />
                   </label>
+                  <label>
+                    <span className="setup-label">Scope</span>
+                    <select
+                      value={apiKeyScope}
+                      onChange={(event) => onApiKeyScopeChange(event.target.value)}
+                      aria-label="API key scope"
+                    >
+                      {apiKeyScopes.map((scope) => (
+                        <option key={scope} value={scope}>
+                          {scope}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
                   <button type="submit" className="btn-compact" disabled={!identity || !isAdmin}>
                     Generate key
                   </button>
@@ -1222,16 +1243,30 @@ export function AdminView(props: AdminViewProps) {
                     <thead>
                       <tr>
                         <th>Label</th>
-                        <th>Tenant</th>
+                        <th>Scopes</th>
+                        <th>Status</th>
                         <th>Created</th>
+                        <th></th>
                       </tr>
                     </thead>
                     <tbody>
                       {apiKeys.map((apiKey) => (
                         <tr key={apiKey.id}>
                           <td>{apiKey.label}</td>
-                          <td>{apiKey.tenantId}</td>
+                          <td>{(apiKey.scopes ?? []).join(", ")}</td>
+                          <td>{apiKey.status ?? "active"}</td>
                           <td>{new Date(apiKey.createdAt).toLocaleString()}</td>
+                          <td>
+                            {apiKey.status === "active" && apiKey.id !== identity?.apiKeyId ? (
+                              <button
+                                type="button"
+                                className="btn-compact secondary"
+                                onClick={() => onRevokeApiKey(apiKey.id)}
+                              >
+                                Revoke
+                              </button>
+                            ) : null}
+                          </td>
                         </tr>
                       ))}
                     </tbody>

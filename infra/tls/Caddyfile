@@ -6,7 +6,11 @@ https://{$EDGE_HOST}:{$EDGE_HTTPS_PORT} {
 	tls /certs/localhost-fullchain.pem /certs/localhost.key
 
 	handle /control-plane/internal* {
-		respond 403
+		respond 404
+	}
+
+	handle /gateway/internal* {
+		respond 404
 	}
 
 	handle_path /control-plane/* {
@@ -14,15 +18,21 @@ https://{$EDGE_HOST}:{$EDGE_HTTPS_PORT} {
 	}
 
 	handle_path /gateway/* {
-		reverse_proxy gateway:8080
+		reverse_proxy gateway:8080 {
+			flush_interval -1
+		}
 	}
 
-	handle_path /opa/* {
-		reverse_proxy opa:8181
+	# OPA and Ollama have no authentication: through the edge, anyone could
+	# PUT /v1/policies and replace the authorization policy, or drive the
+	# local model. Only the control plane and gateway talk to them, over the
+	# internal network, so they are not routed here.
+	handle /opa* {
+		respond 404
 	}
 
-	handle_path /policy-llm/* {
-		reverse_proxy policy-llm:11434
+	handle /policy-llm* {
+		respond 404
 	}
 
 	handle {

@@ -1,3 +1,5 @@
+> The complete, current variable reference for production is [production/CONFIGURATION.md](production/CONFIGURATION.md).
+
 # Configuration
 
 All values below are names and defaults only — never commit real values.
@@ -13,6 +15,9 @@ are git-ignored.
 | `POSTGRES_PORT` | `5432` | No | Host port for PostgreSQL |
 | `REDIS_PORT` | `6379` | No | Host port for Redis |
 | `OPA_PORT` | `8181` | No | Host port for OPA |
+| `OPA_BIND` / `POLICY_LLM_BIND` | `127.0.0.1` | No | Host address OPA / Ollama ports bind to (both are unauthenticated) |
+| `SUEZ_EXPOSE_DEMO_CREDENTIALS` | unset | No | `true` makes the control plane's bootstrap endpoint return the demo key and JWTs |
+| `MAX_REQUEST_BODY_BYTES` | 8 MiB gateway / 1 MiB control plane | No | Request body limit |
 | `GATEWAY_PORT` | `8080` | No | Host port for the gateway |
 | `CONTROL_PLANE_PORT` | `8081` | No | Host port for the control plane |
 | `PORTAL_UI_PORT` | `5173` | No | Host port for the portal dev server |

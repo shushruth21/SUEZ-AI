@@ -1,0 +1,87 @@
+# End-to-end test stack. Nothing is published to the host; the test runner
+# joins this network as "e2e" and also serves the mock identity provider
+# (:9100) and mock OpenAI-compatible provider (:9200). Run it with
+# scripts/e2e.sh.
+x-common: &common
+  SUEZ_ENV: development
+  SUEZ_INTERNAL_TOKEN: e2e-internal-token-0123456789abcdef0123
+  DATABASE_URL: postgres://suez:e2e-password@postgres:5432/suez?sslmode=disable
+  RATE_LIMIT_RPM: "0"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment: {POSTGRES_DB: suez, POSTGRES_USER: suez, POSTGRES_PASSWORD: e2e-password}
+    tmpfs: [/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U suez -d suez"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  migrate:
+    image: postgres:16-alpine
+    environment: {DATABASE_URL: "postgres://suez:e2e-password@postgres:5432/suez?sslmode=disable"}
+    entrypoint: ["/bin/sh", "/scripts/migrate.sh", "/db/migrations", "/db/seeds"]
+    volumes:
+      - ../../scripts/migrate.sh:/scripts/migrate.sh:ro
+      - ../db/migrations:/db/migrations:ro
+      - ../db/seeds:/db/seeds:ro
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  opa:
+    build: {context: ../opa}
+
+  control-plane:
+    build: {context: ../../apps/control-plane}
+    environment:
+      <<: *common
+      PORT: "8081"
+      JWT_MODE: jwks
+      JWT_ISSUER: http://e2e:9100
+      JWT_AUDIENCE: suez-api
+      SUEZ_DATA_KEY: ZTJlLWRhdGEta2V5LTAxMjM0NTY3ODlhYmNkZWYwMTI=
+      OPA_BASE_URL: http://opa:8181
+      OPA_DECISION_URL: http://opa:8181/v1/data/suez/authz/decision
+      OPA_HEALTH_URL: http://opa:8181/health
+      POLICY_LLM_URL: http://policy-llm.invalid:11434/api/tags
+      POLICY_LLM_BASE_URL: http://policy-llm.invalid:11434
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      opa: {condition: service_started}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8081/readyz >/dev/null || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  gateway:
+    build: {context: ../../apps/gateway}
+    environment:
+      <<: *common
+      PORT: "8080"
+      REDIS_URL: redis://redis:6379/0
+      OPA_DECISION_URL: http://opa:8181/v1/data/suez/authz/decision
+      OPA_HEALTH_URL: http://opa:8181/health
+      CONTROL_PLANE_HEALTH_URL: http://control-plane:8081/healthz
+      CONTROL_PLANE_INTERNAL_URL: http://control-plane:8081
+      AUTH_RESOLVER_URL: http://control-plane:8081/internal/auth/resolve
+      # Never a real key: the "provider" is the mock inside the test runner.
+      OPENAI_COMPAT_API_KEY: e2e-provider-key-not-real
+    depends_on:
+      control-plane: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/readyz >/dev/null || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30

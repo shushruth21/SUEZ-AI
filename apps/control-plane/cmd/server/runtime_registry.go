@@ -21,6 +21,7 @@ type modelRecord struct {
 	MaxRPM          int    `json:"maxRpm"`
 	MaxTPM          int    `json:"maxTpm"`
 	Enabled         bool   `json:"enabled"`
+	ContextWindow   int    `json:"contextWindow,omitempty"`
 	CreatedAt       string `json:"createdAt"`
 	UpdatedAt       string `json:"updatedAt"`
 }
@@ -43,26 +44,26 @@ type toolRecord struct {
 }
 
 type policyRecord struct {
-	ID                  string `json:"id"`
-	TenantID            string `json:"tenantId"`
-	ParentPolicyID      string `json:"parentPolicyId,omitempty"`
-	Name                string `json:"name"`
-	Scope               string `json:"scope"`
-	TargetName          string `json:"targetName,omitempty"`
-	NaturalLanguageRule string `json:"naturalLanguageRule,omitempty"`
-	GenerationPrompt    string `json:"generationPrompt,omitempty"`
-	GeneratorModel      string `json:"generatorModel,omitempty"`
-	RegoPackage         string `json:"regoPackage"`
-	RegoSource          string `json:"regoSource"`
-	Status              string `json:"status"`
-	Version             int    `json:"version"`
-	Enabled             bool   `json:"enabled"`
+	ID                  string   `json:"id"`
+	TenantID            string   `json:"tenantId"`
+	ParentPolicyID      string   `json:"parentPolicyId,omitempty"`
+	Name                string   `json:"name"`
+	Scope               string   `json:"scope"`
+	TargetName          string   `json:"targetName,omitempty"`
+	NaturalLanguageRule string   `json:"naturalLanguageRule,omitempty"`
+	GenerationPrompt    string   `json:"generationPrompt,omitempty"`
+	GeneratorModel      string   `json:"generatorModel,omitempty"`
+	RegoPackage         string   `json:"regoPackage"`
+	RegoSource          string   `json:"regoSource"`
+	Status              string   `json:"status"`
+	Version             int      `json:"version"`
+	Enabled             bool     `json:"enabled"`
 	ValidationErrors    []string `json:"validationErrors"`
 	PublishedAt         string   `json:"publishedAt,omitempty"`
 	PublishedBy         string   `json:"publishedBy,omitempty"`
 	LastCompiledAt      string   `json:"lastCompiledAt,omitempty"`
-	CreatedAt           string `json:"createdAt"`
-	UpdatedAt           string `json:"updatedAt"`
+	CreatedAt           string   `json:"createdAt"`
+	UpdatedAt           string   `json:"updatedAt"`
 }
 
 type auditEvent struct {
@@ -99,6 +100,9 @@ type createModelRequest struct {
 	MaxRPM          int    `json:"maxRpm"`
 	MaxTPM          int    `json:"maxTpm"`
 	Enabled         bool   `json:"enabled"`
+	// ContextWindow is the model's context size in tokens; 0 means unknown,
+	// in which case no context percentage or threshold applies.
+	ContextWindow int `json:"contextWindow"`
 }
 
 type createToolRequest struct {
@@ -131,7 +135,7 @@ func (a *controlPlaneApp) handleModels(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		models, err := a.listModels(r.Context(), identity.TenantID)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			writeAppError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -139,29 +143,20 @@ func (a *controlPlaneApp) handleModels(w http.ResponseWriter, r *http.Request) {
 			"models":          models,
 		})
 	case http.MethodPost:
-		if !isAdmin(identity) {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin role is required"})
-			return
-		}
 		var req createModelRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 			return
 		}
-		if strings.TrimSpace(req.ExternalName) == "" || strings.TrimSpace(req.Provider) == "" || strings.TrimSpace(req.ModelName) == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "externalName, provider, and modelName are required"})
+		req.Provider = strings.ToLower(strings.TrimSpace(req.Provider))
+		if err := validateModelRequest(req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
-		}
-		if req.MaxRPM <= 0 {
-			req.MaxRPM = 60
-		}
-		if req.MaxTPM <= 0 {
-			req.MaxTPM = 120000
 		}
 
 		model, err := a.createModel(r.Context(), identity.TenantID, req)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			writeAppError(w, err)
 			return
 		}
 		_ = a.insertAudit(r.Context(), identity, "model.create", "model", model.ExternalName, "allow", map[string]any{
@@ -183,25 +178,22 @@ func (a *controlPlaneApp) handleTools(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		tools, err := a.listTools(r.Context(), identity.TenantID)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			writeAppError(w, err)
 			return
+		}
+		if !hasPermission(identity, permCatalogManage) {
+			for index := range tools {
+				tools[index] = redactToolHeaders(tools[index])
+			}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"identityContext": identity,
 			"tools":           tools,
 		})
 	case http.MethodPost:
-		if !isAdmin(identity) {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin role is required"})
-			return
-		}
 		var req createToolRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
-			return
-		}
-		if strings.TrimSpace(req.Name) == "" || strings.TrimSpace(req.Description) == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name and description are required"})
 			return
 		}
 		if strings.TrimSpace(req.ExecutionMode) == "" {
@@ -222,10 +214,16 @@ func (a *controlPlaneApp) handleTools(w http.ResponseWriter, r *http.Request) {
 		if len(req.HTTPHeaders) == 0 {
 			req.HTTPHeaders = json.RawMessage(`{}`)
 		}
+		req.ExecutionMode = strings.ToLower(strings.TrimSpace(req.ExecutionMode))
+		req.RiskTier = strings.ToLower(strings.TrimSpace(req.RiskTier))
+		if err := validateToolRequest(req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
 
 		tool, err := a.createTool(r.Context(), identity.TenantID, req)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			writeAppError(w, err)
 			return
 		}
 		_ = a.insertAudit(r.Context(), identity, "tool.create", "tool", tool.Name, "allow", map[string]any{
@@ -247,7 +245,7 @@ func (a *controlPlaneApp) handlePolicies(w http.ResponseWriter, r *http.Request)
 	case http.MethodGet:
 		policies, err := a.listPolicies(r.Context(), identity.TenantID)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			writeAppError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -255,10 +253,6 @@ func (a *controlPlaneApp) handlePolicies(w http.ResponseWriter, r *http.Request)
 			"policies":        policies,
 		})
 	case http.MethodPost:
-		if !isAdmin(identity) {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin role is required"})
-			return
-		}
 		var req createPolicyRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
@@ -275,7 +269,7 @@ func (a *controlPlaneApp) handlePolicies(w http.ResponseWriter, r *http.Request)
 
 		policy, err := a.createPolicy(r.Context(), identity.TenantID, req)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			writeAppError(w, err)
 			return
 		}
 		_ = a.insertAudit(r.Context(), identity, "policy.create", "policy", policy.Name, "allow", map[string]any{
@@ -298,10 +292,6 @@ func (a *controlPlaneApp) handleAuditLog(w http.ResponseWriter, r *http.Request)
 	}
 
 	identity := mustIdentity(r.Context())
-	if !isAdmin(identity) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin role is required"})
-		return
-	}
 
 	limit := 50
 	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
@@ -332,7 +322,7 @@ func (a *controlPlaneApp) handleAuditLog(w http.ResponseWriter, r *http.Request)
 	}
 	events, err := a.listAuditEvents(r.Context(), identity.TenantID, filters)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeAppError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -348,10 +338,6 @@ func (a *controlPlaneApp) handleAuditTrace(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	identity := mustIdentity(r.Context())
-	if !isAdmin(identity) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin role is required"})
-		return
-	}
 	traceID := strings.TrimPrefix(strings.TrimSpace(r.URL.Path), "/api/v1/audit-log/traces/")
 	if traceID == "" {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "trace not found"})
@@ -362,7 +348,7 @@ func (a *controlPlaneApp) handleAuditTrace(w http.ResponseWriter, r *http.Reques
 		Limit:   200,
 	})
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeAppError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -392,7 +378,7 @@ func (a *controlPlaneApp) handleHTTPToolEcho(w http.ResponseWriter, r *http.Requ
 
 func (a *controlPlaneApp) listModels(ctx context.Context, tenantID string) ([]modelRecord, error) {
 	rows, err := a.db.QueryContext(ctx, `
-		select id, tenant_id, external_name, provider, model_name, coalesce(upstream_model, ''), coalesce(upstream_base_url, ''), max_rpm, max_tpm, enabled, created_at, updated_at
+		select id, tenant_id, external_name, provider, model_name, coalesce(upstream_model, ''), coalesce(upstream_base_url, ''), max_rpm, max_tpm, enabled, coalesce(context_window, 0), created_at, updated_at
 		from models
 		where tenant_id = $1
 		order by created_at asc
@@ -415,10 +401,10 @@ func (a *controlPlaneApp) listModels(ctx context.Context, tenantID string) ([]mo
 
 func (a *controlPlaneApp) createModel(ctx context.Context, tenantID string, req createModelRequest) (modelRecord, error) {
 	row := a.db.QueryRowContext(ctx, `
-		insert into models (tenant_id, provider, model_name, external_name, max_rpm, max_tpm, enabled, upstream_base_url, upstream_model, updated_at)
-		values ($1, $2, $3, $4, $5, $6, $7, nullif($8, ''), nullif($9, ''), now())
-		returning id, tenant_id, external_name, provider, model_name, coalesce(upstream_model, ''), coalesce(upstream_base_url, ''), max_rpm, max_tpm, enabled, created_at, updated_at
-	`, tenantID, strings.TrimSpace(req.Provider), strings.TrimSpace(req.ModelName), strings.TrimSpace(req.ExternalName), req.MaxRPM, req.MaxTPM, req.Enabled, strings.TrimSpace(req.UpstreamBaseURL), strings.TrimSpace(req.UpstreamModel))
+		insert into models (tenant_id, provider, model_name, external_name, max_rpm, max_tpm, enabled, upstream_base_url, upstream_model, context_window, updated_at)
+		values ($1, $2, $3, $4, $5, $6, $7, nullif($8, ''), nullif($9, ''), nullif($10, 0), now())
+		returning id, tenant_id, external_name, provider, model_name, coalesce(upstream_model, ''), coalesce(upstream_base_url, ''), max_rpm, max_tpm, enabled, coalesce(context_window, 0), created_at, updated_at
+	`, tenantID, strings.TrimSpace(req.Provider), strings.TrimSpace(req.ModelName), strings.TrimSpace(req.ExternalName), req.MaxRPM, req.MaxTPM, req.Enabled, strings.TrimSpace(req.UpstreamBaseURL), strings.TrimSpace(req.UpstreamModel), req.ContextWindow)
 	return scanModel(row)
 }
 
@@ -582,6 +568,7 @@ func scanModel(scanner interface {
 		&model.MaxRPM,
 		&model.MaxTPM,
 		&model.Enabled,
+		&model.ContextWindow,
 		&createdAt,
 		&updatedAt,
 	)

@@ -51,27 +51,6 @@ const defaultAuditFilters: AuditFilters = {
   limit: "100"
 };
 
-function encodeBase64Url(value: string) {
-  return window
-    .btoa(value)
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/g, "");
-}
-
-function buildUnsignedJwt(subject: string, role: string) {
-  const header = encodeBase64Url(JSON.stringify({ alg: "none", typ: "JWT" }));
-  const payload = encodeBase64Url(
-    JSON.stringify({
-      sub: subject,
-      tenant_slug: "demo",
-      tenant_name: "Demo Tenant",
-      roles: [role]
-    })
-  );
-  return `${header}.${payload}.`;
-}
-
 function parseJsonText(value: string) {
   return JSON.parse(value) as unknown;
 }
@@ -123,8 +102,6 @@ function buildAuditQuery(filters: AuditFilters) {
   return params.toString();
 }
 
-const demoRequesterJwt = buildUnsignedJwt("requester@example.com", "user");
-
 type AppPage = "landing" | "admin" | "requester";
 
 export default function App() {
@@ -157,6 +134,13 @@ export default function App() {
     environment: "dev"
   });
   const [apiKeyLabel, setApiKeyLabel] = useState("Generated Key");
+  const [apiKeyScope, setApiKeyScope] = useState<string>("gateway-inference");
+  // Demo credentials exist only when a development control plane offers
+  // them; a production deployment returns none and the demo buttons stay off.
+  const [demoCredentials, setDemoCredentials] = useState<{ apiKey: string; requesterJwt: string }>({
+    apiKey: "",
+    requesterJwt: ""
+  });
   const [modelRequestForm, setModelRequestForm] = useState({
     resourceName: "demo-model",
     justification: ""
@@ -245,7 +229,20 @@ export default function App() {
     return headers;
   }, [authMode, authToken]);
 
-  const isAdmin = identity?.roles.some((role) => role.toLowerCase() === "admin");
+  const can = (permission: string) => Boolean(identity?.permissions?.includes(permission));
+  const isAdmin = can("apikeys.manage");
+
+  useEffect(() => {
+    fetch(`${controlPlaneBaseUrl}/api/v1/bootstrap/status`)
+      .then((response) => (response.ok ? response.json() : null))
+      .then((payload) => {
+        const demo = payload?.demoCredentials;
+        if (demo) {
+          setDemoCredentials({ apiKey: demo.apiKey ?? "", requesterJwt: demo.requesterJwt ?? "" });
+        }
+      })
+      .catch(() => undefined);
+  }, []);
   const pendingRequests = accessRequests.filter((request) => request.status === "pending");
 
   // When on landing and role changes, set default credential type and clear status
@@ -402,28 +399,20 @@ export default function App() {
   }
 
   async function loadProtectedData() {
+    // Each list is only requested when the signed-in identity holds the
+    // permission for it; the server enforces the same rule.
+    const load = <T,>(permission: string, path: string): Promise<T> =>
+      can(permission)
+        ? fetchJSON<T>(`${controlPlaneBaseUrl}${path}`, { headers: authHeaders })
+        : Promise.resolve({} as T);
     const [tenantPayload, apiKeyPayload, requestPayload, grantPayload, modelPayload, toolPayload] =
       await Promise.all([
-        fetchJSON<{ tenants?: Tenant[] }>(`${controlPlaneBaseUrl}/api/v1/tenants`, {
-          headers: authHeaders
-        }),
-        fetchJSON<{ apiKeys?: ApiKeySummary[] }>(`${controlPlaneBaseUrl}/api/v1/api-keys`, {
-          headers: authHeaders
-        }),
-        fetchJSON<{ accessRequests?: AccessRequest[] }>(
-          `${controlPlaneBaseUrl}/api/v1/access-requests`,
-          { headers: authHeaders }
-        ),
-        fetchJSON<{ accessGrants?: AccessGrant[] }>(
-          `${controlPlaneBaseUrl}/api/v1/access-grants`,
-          { headers: authHeaders }
-        ),
-        fetchJSON<{ models?: ModelRecord[] }>(`${controlPlaneBaseUrl}/api/v1/models`, {
-          headers: authHeaders
-        }),
-        fetchJSON<{ tools?: ToolRecord[] }>(`${controlPlaneBaseUrl}/api/v1/tools`, {
-          headers: authHeaders
-        })
+        load<{ tenants?: Tenant[] }>("tenants.read", "/api/v1/tenants"),
+        load<{ apiKeys?: ApiKeySummary[] }>("apikeys.manage", "/api/v1/api-keys"),
+        load<{ accessRequests?: AccessRequest[] }>("grants.read", "/api/v1/access-requests"),
+        load<{ accessGrants?: AccessGrant[] }>("grants.read", "/api/v1/access-grants"),
+        load<{ models?: ModelRecord[] }>("catalog.read", "/api/v1/models"),
+        load<{ tools?: ToolRecord[] }>("catalog.read", "/api/v1/tools")
       ]);
 
     setTenants(tenantPayload.tenants ?? []);
@@ -433,7 +422,7 @@ export default function App() {
     setModels(modelPayload.models ?? []);
     setTools(toolPayload.tools ?? []);
 
-    if (identity?.roles.some((role) => role.toLowerCase() === "admin")) {
+    if (can("policy.read") && can("audit.read")) {
       const policyPayload = await fetchJSON<{ policies?: PolicyRecord[] }>(
         `${controlPlaneBaseUrl}/api/v1/policies`,
         {
@@ -490,6 +479,19 @@ export default function App() {
     }
   }
 
+  async function handleRevokeApiKey(apiKeyId: string) {
+    try {
+      await fetchJSON(`${controlPlaneBaseUrl}/api/v1/api-keys/${apiKeyId}`, {
+        method: "DELETE",
+        headers: authHeaders
+      });
+      setStatusMessage("Revoked the API key.");
+      await loadProtectedData();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Failed to revoke API key.");
+    }
+  }
+
   async function handleCreateApiKey(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     try {
@@ -503,7 +505,8 @@ export default function App() {
           },
           body: JSON.stringify({
             label: apiKeyLabel,
-            tenantId: identity?.tenantId
+            tenantId: identity?.tenantId,
+            scopes: [apiKeyScope]
           })
         }
       );
@@ -973,7 +976,8 @@ export default function App() {
         selectedRequesterUser={selectedRequesterUser}
         authMode={authMode}
         authToken={authToken}
-        demoRequesterJwt={demoRequesterJwt}
+        demoRequesterJwt={demoCredentials.requesterJwt}
+        demoAdminKey={demoCredentials.apiKey}
         statusMessage={statusMessage}
         onRoleChange={setSelectedRole}
         onRequesterUserChange={setSelectedRequesterUser}
@@ -1029,6 +1033,9 @@ export default function App() {
           generatedKey={generatedKey}
           decisionReason={decisionReason}
           apiKeyLabel={apiKeyLabel}
+          apiKeyScope={apiKeyScope}
+          onApiKeyScopeChange={setApiKeyScope}
+          onRevokeApiKey={handleRevokeApiKey}
           tenantForm={tenantForm}
           modelForm={modelForm}
           toolForm={toolForm}

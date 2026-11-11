@@ -14,9 +14,9 @@ export type IdentityContext = {
   apiKeyId?: string;
   jwtSubject?: string;
   roles: string[];
+  scopes?: string[];
+  permissions?: string[];
   authenticatedAt: string;
-  claims?: Record<string, unknown>;
-  metadata?: Record<string, unknown>;
 };
 
 export type Tenant = {
@@ -30,8 +30,21 @@ export type ApiKeySummary = {
   id: string;
   tenantId: string;
   label: string;
+  keyPrefix?: string;
+  scopes?: string[];
+  status?: string;
+  expiresAt?: string;
+  lastUsedAt?: string;
   createdAt: string;
 };
+
+export const apiKeyScopes = [
+  "gateway-inference",
+  "read-only",
+  "policy-admin",
+  "audit-reader",
+  "tenant-admin"
+] as const;
 
 export type AccessRequest = {
   id: string;

@@ -11,7 +11,7 @@ SUEZ is installed from source. There are **no published binaries or packages**.
 | | Node.js ≥ 20.19 | Vite 8 requirement; CI uses Node 22 |
 | | Rust stable via [rustup](https://rustup.rs) | `rust-version = 1.77.2` minimum in `Cargo.toml` |
 | | Xcode Command Line Tools | `xcode-select --install` |
-| Go (optional) | Go 1.22 | Or run Go inside `golang:1.22-alpine` |
+| Go (optional) | Go 1.26 | Or run Go inside `golang:1.26-alpine` |
 
 ## 2. Get the source
 

@@ -8,6 +8,7 @@ type LandingPageProps = {
   authMode: AuthMode;
   authToken: string;
   demoRequesterJwt: string;
+  demoAdminKey: string;
   statusMessage: string;
   onRoleChange: (role: PortalTab) => void;
   onRequesterUserChange: (user: RequesterUser) => void;
@@ -23,6 +24,7 @@ export function LandingPage({
   authMode,
   authToken,
   demoRequesterJwt,
+  demoAdminKey,
   statusMessage,
   onRoleChange,
   onRequesterUserChange,
@@ -102,13 +104,15 @@ export function LandingPage({
             <button
               type="button"
               className="landing-demo secondary"
+              disabled={selectedRole === "admin" ? !demoAdminKey : !demoRequesterJwt}
+              title="Available only when a development control plane offers demo credentials"
               onClick={() =>
                 selectedRole === "admin"
-                  ? onApplyDemoCredential("apiKey", "suez-demo-admin-key")
+                  ? onApplyDemoCredential("apiKey", demoAdminKey)
                   : onApplyDemoCredential("jwt", demoRequesterJwt)
               }
             >
-              Use demo {selectedRole === "admin" ? "admin key" : `${selectedRequesterUser} JWT`}
+              Use demo {selectedRole === "admin" ? "admin key" : "requester JWT"}
             </button>
             <button type="submit" className="landing-submit">
               Sign in

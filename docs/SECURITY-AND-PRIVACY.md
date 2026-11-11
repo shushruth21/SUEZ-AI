@@ -1,3 +1,5 @@
+> **Production deployments:** start with [production/README.md](production/README.md) — threat model, configuration, runbooks, go-live checklist and verified limitations. Sections below describe the development stack and Context Guardian.
+
 # Security and Privacy
 
 This document describes how SUEZ handles credentials and data **as
@@ -6,12 +8,12 @@ vulnerabilities see [SECURITY.md](../SECURITY.md).
 
 ## Summary
 
-| Area | Context Guardian (desktop) | Gateway stack (local) |
+| Area | Context Guardian (desktop) | Gateway stack |
 | --- | --- | --- |
 | Credentials | Gateway API key in the OS credential store (macOS Keychain), accessed only from Rust | Provider keys from env vars or `infra/secrets/*`; client API keys stored as SHA-256 hashes |
-| Data at rest | Plain JSON in the app-data directory (not encrypted by the app) | PostgreSQL volume, Redis (not encrypted by SUEZ) |
-| Network | HTTP(S) to the configured gateway URL only | Local Docker network; HTTPS edge with a locally generated certificate |
-| Hardening | Secret guard on save and copy; key scrubbing in errors | **Not production-hardened** (see below) |
+| Data at rest | Plain JSON in the app-data directory (not encrypted by the app) | PostgreSQL and Redis; SUEZ Memory content is envelope-encrypted (AES-256-GCM) by the control plane |
+| Network | HTTP(S) to the configured gateway URL only | Only the Caddy edge is public in production (ACME TLS); development uses a locally generated certificate |
+| Hardening | Secret guard on save and copy; key scrubbing in errors | Production mode (`SUEZ_ENV=production`) refuses unsafe settings; see [production/THREAT-MODEL.md](production/THREAT-MODEL.md) |
 
 ## Context Guardian
 
@@ -72,16 +74,35 @@ key travels in clear text.
 - Context-usage measurements are only returned to the **same tenant and
   actor** that created them.
 - API keys are stored hashed (SHA-256).
+- Tenants and API keys: non-admins see only their own tenant and cannot create
+  tenants or keys; admins manage keys only in their own tenant. A JWT's tenant
+  must exist in the database and `tenant_id`/`tenant_slug` must agree.
+- Tenant IDs and resource names are JSON-escaped when written into generated
+  Rego, so they cannot inject policy logic.
+- Tenant policies are isolated in OPA: each published policy is loaded into
+  `suez.generated.t_<tenant>.p_<policy>` and the base policy only consults the
+  caller's tenant, so a tenant admin cannot write Rego that affects another
+  tenant or overrides the base checks (identity, enabled resource, high-risk
+  tools). Drafts are validated and tested in a private sandbox package, never
+  in the live policy set.
+- Tool `httpHeaders` (which may hold upstream tokens) are only shown to admins.
+- Request bodies are size-limited (`MAX_REQUEST_BODY_BYTES`; 8 MiB gateway,
+  1 MiB control plane) and both services set read/write/idle timeouts.
+- Provider and tool error bodies are kept in logs and the audit log; API
+  callers get a short message and a `traceId`.
+- Context Guardian sends its API key over plain `http://` only to loopback
+  hosts; any other gateway must use `https://`.
 
 ### Known limitations (local-development runtime)
 
 | Limitation | Risk | Mitigation |
 | --- | --- | --- |
-| **JWT signatures are not verified** — claims are decoded only | Anyone who can reach the API can impersonate any user with a crafted JWT | Never expose the stack to untrusted networks; implement verification before any shared deployment |
-| Demo API key and demo identities are seeded (`suez-demo-admin-key`, `*@example.com`) | Well-known admin credential | Local use only; create new keys and remove demo data for anything shared |
+| JWTs are verified against the IdP (`JWT_MODE=jwks`); the development stack uses a shared-secret mode (`dev-hs256`) that production refuses | Development tokens are signed with a known secret | Use `jwks` in production; see production/CONFIGURATION.md |
+| Demo API key and demo identities are seeded (`suez-demo-admin-key`, `*@example.com`) | Well-known admin credential | Local use only; create new keys and remove demo data for anything shared. The unauthenticated bootstrap endpoint only returns them when `SUEZ_EXPOSE_DEMO_CREDENTIALS=true` |
+| API keys are scoped (read-only, gateway-inference, policy-admin, audit-reader, tenant-admin); keys created before migration 0007 keep `tenant-admin` | Old keys stay broad | Replace old keys with scoped ones and revoke them |
 | Default DB password `suez` | Trivial DB access if the port is reachable | Set `POSTGRES_PASSWORD` in `.env` |
-| All ports published on `0.0.0.0` | Services reachable from the local network | Bind to `127.0.0.1` or firewall |
-| `Access-Control-Allow-Origin: *` on gateway and control plane | Any website can call the APIs from a browser that holds credentials | Restrict origins before sharing |
+| The development stack publishes ports on `127.0.0.1` (`BIND_ADDRESS`); the production example publishes only the edge | Local services reachable from the host | Keep `BIND_ADDRESS=127.0.0.1` |
+| CORS is an explicit allowlist (`CORS_ALLOWED_ORIGINS`); the development stack allows `*` | Any site can call the development APIs | Production refuses `*` |
 | Self-signed / locally trusted TLS on the edge; internal traffic is plain HTTP | Not suitable beyond a single machine | Use real certificates and TLS between services |
 | Chat messages are forwarded to external providers for provider-backed models; responses are cached in Redis for 60 s | Prompt content leaves the machine / persists briefly | Use the stub or local models for sensitive data |
 | Tool inputs and outputs are stored in `tool_executions` | Sensitive tool data persists in PostgreSQL | Avoid sensitive payloads; plan a retention policy |
