@@ -1,4 +1,4 @@
-FROM openpolicyagent/opa:1.22.2
+FROM openpolicyagent/opa:1.22.4
 
 COPY policies /policy/suez
 COPY data.json /policy/data.json
